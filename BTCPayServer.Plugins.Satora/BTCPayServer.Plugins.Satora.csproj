@@ -20,16 +20,19 @@
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
     <OutputType>Library</OutputType>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <SatoraSdkRoot>$(MSBuildProjectDirectory)/../../lendaswap-sdk</SatoraSdkRoot>
+    <SatoraSdkNativeTargetDir>$(MSBuildProjectDirectory)/obj/satora-sdk-native</SatoraSdkNativeTargetDir>
   </PropertyGroup>
 
-  <!-- This will make sure that referencing BTCPayServer doesn't put any artifact in the published directory -->
-  <ItemDefinitionGroup>
-    <ProjectReference>
-      <Properties>StaticWebAssetsEnabled=false</Properties>
-      <Private>false</Private>
-      <ExcludeAssets>runtime;native;build;buildTransitive;contentFiles</ExcludeAssets>
-    </ProjectReference>
-  </ItemDefinitionGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <SatoraSdkNativeFileName>libsatora_sdk_ffi.dylib</SatoraSdkNativeFileName>
+  </PropertyGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <SatoraSdkNativeFileName>libsatora_sdk_ffi.so</SatoraSdkNativeFileName>
+  </PropertyGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <SatoraSdkNativeFileName>satora_sdk_ffi.dll</SatoraSdkNativeFileName>
+  </PropertyGroup>
 
   <ItemGroup Condition="$(Configuration) != 'Release'">
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" />
@@ -41,15 +44,40 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
+    <ProjectReference Include="..\btcpayserver\BTCPayServer\BTCPayServer.csproj"
+                      Private="false"
+                      ExcludeAssets="runtime;native;build;buildTransitive;contentFiles">
+      <Properties>StaticWebAssetsEnabled=false</Properties>
+    </ProjectReference>
+    <ProjectReference Include="..\..\lendaswap-sdk\dotnet-sdk\Satora.Sdk\Satora.Sdk.csproj"
+                      Private="true" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="Resources\**" />
+    <SatoraSdkNativeSources Include="$(SatoraSdkRoot)/dotnet-sdk/native/Cargo.toml" />
+    <SatoraSdkNativeSources Include="$(SatoraSdkRoot)/dotnet-sdk/native/Cargo.lock" />
+    <SatoraSdkNativeSources Include="$(SatoraSdkRoot)/dotnet-sdk/native/src/**/*.rs" />
   </ItemGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Satora.Sdk" Version="0.1.0-ci.20260526.24.sha-bc55b9b" />
-  </ItemGroup>
+  <Target Name="BuildLocalSatoraSdkNative"
+          BeforeTargets="ResolveReferences"
+          Condition="'$(SkipSatoraSdkNativeBuild)' != 'true'"
+          Inputs="@(SatoraSdkNativeSources)"
+          Outputs="$(SatoraSdkNativeTargetDir)/release/$(SatoraSdkNativeFileName)">
+    <Error Condition="'$(SatoraSdkNativeFileName)' == ''"
+           Text="Unsupported OS for building the local Satora SDK native library." />
+    <Exec Command="cargo build --manifest-path &quot;$(SatoraSdkRoot)/dotnet-sdk/native/Cargo.toml&quot; --release --target-dir &quot;$(SatoraSdkNativeTargetDir)&quot;" />
+  </Target>
+
+  <Target Name="CopyLocalSatoraSdkNative"
+          AfterTargets="Build"
+          Condition="'$(SkipSatoraSdkNativeBuild)' != 'true'">
+    <Error Condition="!Exists('$(SatoraSdkNativeTargetDir)/release/$(SatoraSdkNativeFileName)')"
+           Text="The local Satora SDK native library was not found at $(SatoraSdkNativeTargetDir)/release/$(SatoraSdkNativeFileName)." />
+    <Copy SourceFiles="$(SatoraSdkNativeTargetDir)/release/$(SatoraSdkNativeFileName)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

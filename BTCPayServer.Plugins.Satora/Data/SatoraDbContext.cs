@@ -15,6 +15,7 @@ public class SatoraPluginDbContext : DbContext
 
     public DbSet<SatoraSettings> SatoraSettings { get; set; }
     public DbSet<SatoraTx> SatoraTransactions { get; set; }
+    public DbSet<SatoraLightningSwap> SatoraLightningSwaps { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

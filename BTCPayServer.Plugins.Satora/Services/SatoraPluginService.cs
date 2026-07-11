@@ -1,7 +1,14 @@
 using BTCPayServer.Plugins.Satora.Data;
+using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
+using BTCPayServer.Plugins.Satora.Payments;
+using BTCPayServer.Payments;
+using BTCPayServer.Payments.Lightning;
+using BTCPayServer.Services.Stores;
+using BTCPayServer.Data;
 using Microsoft.EntityFrameworkCore;
 using NBitcoin;
+using Newtonsoft.Json.Linq;
 using Satora.Sdk;
 using uniffi.satora_sdk_ffi;
 
@@ -11,7 +18,8 @@ namespace BTCPayServer.Plugins.Satora.Services
         SatoraPluginDbContextFactory pluginDbContextFactory,
         ILogger<SatoraPluginService> logger,
         SatoraService satoraService,
-        SatoraSettlementService settlementService)
+        SatoraSettlementService settlementService,
+        StoreRepository storeRepository)
     {
 
         public async Task<SatoraSettings> GetStoreSettings(string storeId)
@@ -75,26 +83,63 @@ namespace BTCPayServer.Plugins.Satora.Services
         {
             try
             {
-                if (settings.Seed == null)
-                    settings.Seed = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
-
                 await using var _context = pluginDbContextFactory.CreateContext();
                 var dbSettings = await _context.SatoraSettings.FirstOrDefaultAsync(a => a.StoreId == settings.StoreId);
                 if (dbSettings == null)
+                {
+                    if (settings.Seed == null)
+                        settings.Seed = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
                     _context.SatoraSettings.Add(settings);
+                }
                 else
                 {
                     dbSettings.Enabled = settings.Enabled;
-                    dbSettings.Seed    = settings.Seed;
+                    if (settings.Seed != null)
+                        dbSettings.Seed = settings.Seed;
                     _context.SatoraSettings.Update(dbSettings);
                 }
                 await _context.SaveChangesAsync();
+                await SyncStorePaymentMethodConfig(dbSettings ?? settings);
             }
             catch (Exception e)
             {
                 logger.LogError(e, "SatoraPlugin:UpdateSettings()");
                 throw;
             }
+        }
+
+        private async Task SyncStorePaymentMethodConfig(SatoraSettings settings)
+        {
+            var store = await storeRepository.FindStore(settings.StoreId);
+            if (store is null)
+            {
+                logger.LogWarning("SatoraPlugin:SyncStorePaymentMethodConfig(): store {StoreId} not found", settings.StoreId);
+                return;
+            }
+
+            store.SetPaymentMethodConfig(
+                SatoraPaymentMethod.PaymentMethodId,
+                settings.Enabled
+                    ? JObject.FromObject(new SatoraPaymentMethodConfig { Enabled = true })
+                    : null);
+
+            store.SetPaymentMethodConfig(
+                PaymentTypes.LN.GetPaymentMethodId("BTC"),
+                settings.Enabled
+                    ? JObject.FromObject(new LightningPaymentMethodConfig
+                    {
+                        ConnectionString = SatoraLightningConnectionStringHandler.ToConnectionString(settings.StoreId)
+                    })
+                    : null);
+            await storeRepository.UpdateStore(store);
+        }
+
+        public async Task SyncStorePaymentMethodConfigs(CancellationToken cancellationToken = default)
+        {
+            await using var _context = pluginDbContextFactory.CreateContext();
+            var settings = await _context.SatoraSettings.ToListAsync(cancellationToken);
+            foreach (var setting in settings)
+                await SyncStorePaymentMethodConfig(setting);
         }
 
         public async Task AddStoreTransaction(SatoraTx tx)
@@ -252,7 +297,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                             ulong.TryParse(swap.ReceiveAmount, out var redeemedSats);
                             try
                             {
-                                await settlementService.SettleAsync(dbSwap.BTCPayInvoiceId, dbSwap.ClaimTxId, redeemedSats);
+                                await settlementService.SettleAsync(dbSwap.BTCPayInvoiceId, dbSwap.ClaimTxId, redeemedSats, swapId);
                             }
                             catch (Exception se)
                             {
@@ -288,7 +333,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                             ulong.TryParse(swap.ReceiveAmount, out var redeemedSats);
                             try
                             {
-                                await settlementService.SettleAsync(dbSwap.BTCPayInvoiceId, dbSwap.ClaimTxId, redeemedSats);
+                                await settlementService.SettleAsync(dbSwap.BTCPayInvoiceId, dbSwap.ClaimTxId, redeemedSats, swapId);
                             }
                             catch (Exception se)
                             {

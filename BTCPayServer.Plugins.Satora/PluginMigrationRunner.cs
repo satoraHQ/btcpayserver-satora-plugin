@@ -7,7 +7,8 @@ namespace BTCPayServer.Plugins.Satora;
 
 public class PluginMigrationRunner(
         ISettingsRepository settingsRepository,
-        SatoraPluginDbContextFactory pluginDbContextFactory) : IHostedService
+        SatoraPluginDbContextFactory pluginDbContextFactory,
+        SatoraPluginService pluginService) : IHostedService
 {
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -16,6 +17,7 @@ public class PluginMigrationRunner(
                        new PluginDataMigrationHistory();
         await using var ctx = pluginDbContextFactory.CreateContext();
         await ctx.Database.MigrateAsync(cancellationToken);
+        await pluginService.SyncStorePaymentMethodConfigs(cancellationToken);
 
         // settings migrations
         if (!settings.UpdatedSomething)
@@ -35,4 +37,3 @@ public class PluginMigrationRunner(
         public bool UpdatedSomething { get; set; }
     }
 }
-
