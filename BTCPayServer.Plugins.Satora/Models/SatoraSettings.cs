@@ -14,9 +14,15 @@ public class SatoraSettings
     [Display(Name = "Enabled in checkout")]
     public bool Enabled { get; set; }
 
+    public bool BackupConfirmed { get; set; }
+
+    public DateTimeOffset? WalletCreated { get; set; }
+
+    public DateTimeOffset? BackupConfirmedAt { get; set; }
+
     public string? CryptedSeed { get; set; }
 
-    private string _seed;
+    private string? _seed;
 
     private const int SaltSize = 16;
     private const int KeySize = 32;
@@ -58,6 +64,13 @@ public class SatoraSettings
 
         set
         {
+            if (value is null)
+            {
+                _seed = null;
+                CryptedSeed = null;
+                return;
+            }
+
             var salt = RandomNumberGenerator.GetBytes(SaltSize);
             var key = Rfc2898DeriveBytes.Pbkdf2(StoreId, salt, Iterations, HashAlgorithmName.SHA256, KeySize);
             using var aes = Aes.Create();

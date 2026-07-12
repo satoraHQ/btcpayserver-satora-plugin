@@ -35,86 +35,93 @@
 <br />
 
 <div permission="@Policies.CanModifyStoreSettings">
-    <h4>Configuration</h4>
-    <form method="post">
-        @Html.AntiForgeryToken()
-        <input asp-for="Settings.StoreId" type="hidden" />
-        <div class="form-group">
-            <table>
-                <tr>
-                    <td width="100%">
-                        <div class="d-flex align-items-center">
-                            <input asp-for="@Model.Settings.Enabled" type="checkbox" class="btcpay-toggle me-3" />
-                            <label asp-for="@Model.Settings.Enabled" class="form-check-label"></label>
-                        </div>
-                    </td>
-                    <td align="right">
-                        <button name="command" type="submit" value="save" class="btn btn-primary">Save</button>
-                    </td>
-                </tr>
-            </table>
-        </div>
-    </form>
-
-    @if (Model.Settings.Seed != null)
+    @{
+        var hasWallet = !string.IsNullOrEmpty(Model.Settings.CryptedSeed);
+        var walletReady = hasWallet && Model.Settings.BackupConfirmed;
+    }
+    <h4>Wallet setup</h4>
+    @if (!Model.CanManageSeed)
     {
-        <div class="form-group mt-3">
-            <h4>Seed Phrase</h4>
-            <div class="alert alert-warning alert-dismissible fade show d-flex align-items-start gap-2" role="alert" id="seedWarningAlert">
-                <span>⚠</span>
-                <span class="flex-grow-1">
-                    <strong>Warning:</strong> Never share your seed phrase with anyone.
-                    Anyone who obtains it can take full control of your wallet.
-                    Store it securely offline.
-                </span>
-                <button type="button" class="btn btn-link text-decoration-none p-0 border-0" data-bs-dismiss="alert" aria-label="Close">
-                    <span aria-hidden="true" style="font-weight: bold; font-size: 1.2rem; color: #000;">✕</span>
-                </button>
+        <div class="alert alert-warning">
+            Only the store owner can create, import, view, or enable the Satora wallet seed.
+        </div>
+    }
+    else
+    {
+        <div class="d-flex flex-wrap gap-3 mb-4">
+            <div>
+                <div class="text-secondary small">Wallet</div>
+                <strong>@(hasWallet ? "Seed stored" : "Not set up")</strong>
             </div>
-            <div class="input-group">
-                <input type="password"
-                       id="seedPhraseInput"
-                       class="form-control font-monospace"
-                       value="@Model.Settings.Seed"
-                       readonly
-                       autocomplete="off"
-                       data-sensitive />
-                <button class="btn btn-outline-secondary"
-                        type="button"
-                        id="toggleSeedBtn"
-                        onclick="toggleSeedPhrase()"
-                        title="Show / Hide seed phrase">
-                    Show
-                </button>
-                <button class="btn btn-outline-secondary"
-                        type="button"
-                        onclick="copySeedPhrase()"
-                        title="Copy seed phrase to clipboard">
-                    Copy
-                </button>
+            <div>
+                <div class="text-secondary small">Backup</div>
+                <strong>@(Model.Settings.BackupConfirmed ? "Confirmed" : "Required")</strong>
             </div>
-            <div id="seedCopiedMsg" class="text-success small mt-1" style="display:none;">
-                Copied to clipboard!
+            <div>
+                <div class="text-secondary small">Checkout / Lightning</div>
+                <strong>@(Model.Settings.Enabled && walletReady ? "Enabled" : "Disabled")</strong>
             </div>
         </div>
-        <script>
-            function toggleSeedPhrase() {
-                const input = document.getElementById('seedPhraseInput');
-                const btn   = document.getElementById('toggleSeedBtn');
-                const isHidden = input.type === 'password';
-                input.type   = isHidden ? 'text' : 'password';
-                btn.textContent = isHidden ? 'Hide' : 'Show';
-            }
 
-            function copySeedPhrase() {
-                const input = document.getElementById('seedPhraseInput');
-                navigator.clipboard.writeText(input.value).then(() => {
-                    const msg = document.getElementById('seedCopiedMsg');
-                    msg.style.display = 'block';
-                    setTimeout(() => msg.style.display = 'none', 2500);
-                });
-            }
-        </script>
+        @if (!hasWallet)
+        {
+            <form method="post" asp-action="GenerateWallet" asp-route-storeId="@Model.Settings.StoreId" class="mb-4">
+                @Html.AntiForgeryToken()
+                <button type="submit" class="btn btn-primary">Generate new seed</button>
+            </form>
+
+            <h5>Restore existing wallet</h5>
+            <form method="post" asp-action="RestoreWallet" asp-route-storeId="@Model.Settings.StoreId" class="mb-4">
+                @Html.AntiForgeryToken()
+                <div class="form-group">
+                    <label for="restoreSeed" class="form-label">Seed phrase</label>
+                    <textarea id="restoreSeed" name="Seed" class="form-control font-monospace" rows="3" autocomplete="off" spellcheck="false"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="restoreSeedConfirmation" class="form-label">Re-enter seed phrase</label>
+                    <textarea id="restoreSeedConfirmation" name="SeedConfirmation" class="form-control font-monospace" rows="3" autocomplete="off" spellcheck="false"></textarea>
+                </div>
+                <button type="submit" class="btn btn-secondary">Restore and enable</button>
+            </form>
+        }
+
+        @if (!string.IsNullOrEmpty(Model.OneTimeSeed))
+        {
+            <div class="alert alert-danger">
+                This seed is shown once. Store it offline before leaving this page.
+            </div>
+            <textarea id="generatedSeed" class="form-control font-monospace mb-3" rows="3" readonly data-sensitive>@Model.OneTimeSeed</textarea>
+        }
+
+        @if (hasWallet && !Model.Settings.BackupConfirmed)
+        {
+            <h5>Confirm backup</h5>
+            <form method="post" asp-action="ConfirmBackup" asp-route-storeId="@Model.Settings.StoreId" class="mb-4">
+                @Html.AntiForgeryToken()
+                <div class="form-group">
+                    <label for="confirmSeed" class="form-label">Re-enter seed phrase</label>
+                    <textarea id="confirmSeed" name="SeedConfirmation" class="form-control font-monospace" rows="3" autocomplete="off" spellcheck="false"></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Confirm backup and enable</button>
+            </form>
+        }
+
+        @if (walletReady)
+        {
+            <h5>Configuration</h5>
+            <form method="post">
+                @Html.AntiForgeryToken()
+                <input name="StoreId" value="@Model.Settings.StoreId" type="hidden" />
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                    <div class="d-flex align-items-center">
+                        <input name="Enabled" value="true" checked="@Model.Settings.Enabled" type="checkbox" class="btcpay-toggle me-3" />
+                        <input name="Enabled" value="false" type="hidden" />
+                        <label asp-for="@Model.Settings.Enabled" class="form-check-label"></label>
+                    </div>
+                    <button name="command" type="submit" value="save" class="btn btn-primary">Save</button>
+                </div>
+            </form>
+        }
     }
 </div>
 <br />
@@ -268,4 +275,3 @@
     }
 </div>
 <br />
-

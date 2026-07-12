@@ -449,9 +449,9 @@ public class SatoraLightningClient(
         return settings.Seed;
     }
 
-    private Client CreateSdkClient(string seed)
+    private global::Satora.Sdk.Client CreateSdkClient(string seed)
     {
-        return new Client(seed, ToSatoraNetwork(network));
+        return new global::Satora.Sdk.Client(seed, ToSatoraNetwork(network));
     }
 
     private static SatoraBitcoinNetwork ToSatoraNetwork(Network network)

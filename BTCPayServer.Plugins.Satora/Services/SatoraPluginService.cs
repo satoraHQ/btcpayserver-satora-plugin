@@ -33,10 +33,10 @@ namespace BTCPayServer.Plugins.Satora.Services
                     settings = new SatoraSettings
                     {
                         StoreId = storeId,
-                        Enabled = false,
-                        Seed = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString()
+                        Enabled = false
                     };
                 }
+                settings.Enabled = settings.Enabled && IsWalletUsable(settings);
                 return settings;
             }
             catch (Exception e)
@@ -60,6 +60,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                         Enabled = false
                     };
                 }
+                settings.Enabled = settings.Enabled && IsWalletUsable(settings);
 
                 var txs = await _context.SatoraTransactions
                     .Where(a => a.StoreId == storeId)
@@ -87,15 +88,12 @@ namespace BTCPayServer.Plugins.Satora.Services
                 var dbSettings = await _context.SatoraSettings.FirstOrDefaultAsync(a => a.StoreId == settings.StoreId);
                 if (dbSettings == null)
                 {
-                    if (settings.Seed == null)
-                        settings.Seed = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
+                    settings.Enabled = settings.Enabled && IsWalletUsable(settings);
                     _context.SatoraSettings.Add(settings);
                 }
                 else
                 {
-                    dbSettings.Enabled = settings.Enabled;
-                    if (settings.Seed != null)
-                        dbSettings.Seed = settings.Seed;
+                    dbSettings.Enabled = settings.Enabled && IsWalletUsable(dbSettings);
                     _context.SatoraSettings.Update(dbSettings);
                 }
                 await _context.SaveChangesAsync();
@@ -106,6 +104,65 @@ namespace BTCPayServer.Plugins.Satora.Services
                 logger.LogError(e, "SatoraPlugin:UpdateSettings()");
                 throw;
             }
+        }
+
+        public async Task<string> GenerateWallet(string storeId)
+        {
+            var seed = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
+            await SaveWalletSeed(storeId, seed, backupConfirmed: false, enabled: false);
+            return seed;
+        }
+
+        public async Task RestoreWallet(SatoraRestoreWalletRequest request)
+        {
+            var seed = NormalizeMnemonic(request.Seed);
+            var confirmation = NormalizeMnemonic(request.SeedConfirmation);
+            if (!string.Equals(seed, confirmation, StringComparison.Ordinal))
+                throw new InvalidOperationException("The seed confirmation did not match.");
+
+            await SaveWalletSeed(request.StoreId, seed, backupConfirmed: true, enabled: true);
+        }
+
+        public async Task ConfirmWalletBackup(SatoraConfirmSeedRequest request)
+        {
+            await using var _context = pluginDbContextFactory.CreateContext();
+            var settings = await _context.SatoraSettings.FirstOrDefaultAsync(a => a.StoreId == request.StoreId);
+            if (settings is null || string.IsNullOrEmpty(settings.Seed))
+                throw new InvalidOperationException("No Satora wallet seed exists for this store.");
+
+            var confirmation = NormalizeMnemonic(request.SeedConfirmation);
+            if (!string.Equals(settings.Seed, confirmation, StringComparison.Ordinal))
+                throw new InvalidOperationException("The seed confirmation did not match.");
+
+            settings.BackupConfirmed = true;
+            settings.BackupConfirmedAt = DateTimeOffset.UtcNow;
+            settings.Enabled = true;
+            await _context.SaveChangesAsync();
+            await SyncStorePaymentMethodConfig(settings);
+        }
+
+        private async Task SaveWalletSeed(string storeId, string seed, bool backupConfirmed, bool enabled)
+        {
+            await using var _context = pluginDbContextFactory.CreateContext();
+            var settings = await _context.SatoraSettings.FirstOrDefaultAsync(a => a.StoreId == storeId);
+            if (settings is null)
+            {
+                settings = new SatoraSettings { StoreId = storeId };
+                _context.SatoraSettings.Add(settings);
+            }
+
+            settings.Seed = seed;
+            settings.BackupConfirmed = backupConfirmed;
+            settings.BackupConfirmedAt = backupConfirmed ? DateTimeOffset.UtcNow : null;
+            settings.WalletCreated ??= DateTimeOffset.UtcNow;
+            settings.Enabled = enabled && backupConfirmed;
+            await _context.SaveChangesAsync();
+            await SyncStorePaymentMethodConfig(settings);
+        }
+
+        private static string NormalizeMnemonic(string seed)
+        {
+            return new Mnemonic(seed.Trim(), Wordlist.English).ToString();
         }
 
         private async Task SyncStorePaymentMethodConfig(SatoraSettings settings)
@@ -119,19 +176,24 @@ namespace BTCPayServer.Plugins.Satora.Services
 
             store.SetPaymentMethodConfig(
                 SatoraPaymentMethod.PaymentMethodId,
-                settings.Enabled
+                IsWalletUsable(settings) && settings.Enabled
                     ? JObject.FromObject(new SatoraPaymentMethodConfig { Enabled = true })
                     : null);
 
             store.SetPaymentMethodConfig(
                 PaymentTypes.LN.GetPaymentMethodId("BTC"),
-                settings.Enabled
+                IsWalletUsable(settings) && settings.Enabled
                     ? JObject.FromObject(new LightningPaymentMethodConfig
                     {
                         ConnectionString = SatoraLightningConnectionStringHandler.ToConnectionString(settings.StoreId)
                     })
                     : null);
             await storeRepository.UpdateStore(store);
+        }
+
+        private static bool IsWalletUsable(SatoraSettings settings)
+        {
+            return settings.BackupConfirmed && !string.IsNullOrEmpty(settings.CryptedSeed);
         }
 
         public async Task SyncStorePaymentMethodConfigs(CancellationToken cancellationToken = default)

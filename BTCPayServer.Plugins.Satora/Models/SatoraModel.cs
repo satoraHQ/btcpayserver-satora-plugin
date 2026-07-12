@@ -10,5 +10,9 @@ namespace BTCPayServer.Plugins.Satora.Models
         public List<SatoraTx> Transactions { get; set; }
 
         public ArkadeBalance? WalletBalance { get; set; }
+
+        public bool CanManageSeed { get; set; }
+
+        public string? OneTimeSeed { get; set; }
     }
 }
