@@ -1,5 +1,10 @@
 ﻿using BTCPayServer.Plugins.Satora.Models;
 using System.Globalization;
+using Satora.Sdk;
+using SatoraBitcoinNetwork = uniffi.satora_sdk_ffi.BitcoinNetwork;
+using SatoraLightningDestination = uniffi.satora_sdk_ffi.LightningDestination;
+using SatoraSwapFunding = uniffi.satora_sdk_ffi.SwapFunding;
+using SatoraSwapStatus = uniffi.satora_sdk_ffi.SwapStatus;
 using uniffi.satora_sdk_ffi;
 
 namespace BTCPayServer.Plugins.Satora.Services
@@ -190,25 +195,85 @@ namespace BTCPayServer.Plugins.Satora.Services
             }
         }
 
-   /*     public async Task<string> SweepToAddressAsync(string destinationArkadeAddress, ulong amountSats, string seedPhrase)
+        public async Task<string> SendArkadeAsync(string destinationArkadeAddress, ulong amountSats, string seedPhrase, SatoraBitcoinNetwork network, CancellationToken cancellationToken = default)
         {
             try
             {
-                using var client = new global::Satora.Sdk.Client(seedPhrase);
+                using var client = new global::Satora.Sdk.Client(seedPhrase, network);
 
-                var sendTxId = await client.SendArkadeAsync(destinationArkadeAddress, amountSats);
+                var sendTxId = await client.SendArkadeAsync(destinationArkadeAddress, amountSats, cancellationToken);
 
-                logger.LogInformation("SatoraPlugin.SweepToAddressAsync(): swept {Sats} sats to {Dest}, ark_txid={Txid}",
+                logger.LogInformation("SatoraPlugin.SendArkadeAsync(): sent {Sats} sats to {Dest}, ark_txid={Txid}",
                     amountSats, destinationArkadeAddress, sendTxId);
 
                 return sendTxId;
             }
             catch (Exception ex)
             {
-                logger.LogError("SatoraPlugin.SweepToAddressAsync(): {Message} - {Sats} sats -> {Dest}",
+                logger.LogError("SatoraPlugin.SendArkadeAsync(): {Message} - {Sats} sats -> {Dest}",
                     ex.Message, amountSats, destinationArkadeAddress);
                 throw;
             }
-        }*/
+        }
+
+        public async Task<SatoraWithdrawResult> SendLightningAsync(
+            SatoraWithdrawReview review,
+            string seedPhrase,
+            SatoraBitcoinNetwork network,
+            CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                using var client = new global::Satora.Sdk.Client(seedPhrase, network);
+                SatoraLightningDestination destination = review.DestinationType switch
+                {
+                    SatoraWithdrawDestinationType.LightningInvoice => new SatoraLightningDestination.Invoice(review.NormalizedDestination),
+                    SatoraWithdrawDestinationType.LightningAddress => new SatoraLightningDestination.Address(review.NormalizedDestination, review.AmountSats),
+                    SatoraWithdrawDestinationType.Lnurl => new SatoraLightningDestination.Lnurl(review.NormalizedDestination, review.AmountSats),
+                    _ => throw new InvalidOperationException("The destination is not a Lightning destination.")
+                };
+
+                var swap = await client.CreateArkadeToLightningSwapAsync(destination, cancellationToken);
+                if (swap.Funding is not SatoraSwapFunding.ArkadeAddress funding)
+                    throw new InvalidOperationException("Satora did not return an Arkade funding address.");
+
+                var fundingSats = ulong.Parse(swap.DepositAmount, CultureInfo.InvariantCulture);
+                var txid = await client.SendArkadeAsync(funding.address, fundingSats, cancellationToken);
+                var status = await client.WaitForSwapStatusAsync(
+                    swap.Id,
+                    new SatoraSwapStatus[]
+                    {
+                        new SatoraSwapStatus.ServerFunded(),
+                        new SatoraSwapStatus.ServerRedeemed(),
+                        new SatoraSwapStatus.Expired(),
+                        new SatoraSwapStatus.ServerWontFund(),
+                        new SatoraSwapStatus.ClientInvalidFunded()
+                    },
+                    TimeSpan.FromSeconds(30),
+                    cancellationToken);
+
+                return new SatoraWithdrawResult
+                {
+                    DestinationType = review.DestinationType,
+                    DestinationTypeDisplay = review.DestinationTypeDisplay,
+                    Destination = review.NormalizedDestination,
+                    AmountSats = review.AmountSats,
+                    AmountBtc = review.AmountBtc,
+                    TransactionId = txid,
+                    SwapId = swap.Id,
+                    FundingAmountSats = fundingSats,
+                    Status = status.GetType().Name,
+                    FeeDescription = fundingSats >= review.AmountSats
+                        ? $"{fundingSats - review.AmountSats} sats quoted swap/network difference"
+                        : "Satora returned a funding amount below the requested amount."
+                };
+            }
+            catch (Exception ex)
+            {
+                logger.LogError("SatoraPlugin.SendLightningAsync(): {Message} - {Sats} sats -> {Dest}",
+                    ex.Message, review.AmountSats, review.NormalizedDestination);
+                throw;
+            }
+        }
     }
 }

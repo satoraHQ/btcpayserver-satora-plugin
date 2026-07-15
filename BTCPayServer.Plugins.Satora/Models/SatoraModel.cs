@@ -1,6 +1,4 @@
 
-using uniffi.satora_sdk_ffi;
-
 namespace BTCPayServer.Plugins.Satora.Models
 {
     public class SatoraModel
@@ -9,10 +7,16 @@ namespace BTCPayServer.Plugins.Satora.Models
 
         public List<SatoraTx> Transactions { get; set; }
 
-        public ArkadeBalance? WalletBalance { get; set; }
+        public SatoraWalletBalance? WalletBalance { get; set; }
 
         public bool CanManageSeed { get; set; }
 
         public string? OneTimeSeed { get; set; }
+
+        public SatoraWithdrawRequest WithdrawRequest { get; set; } = new();
+
+        public SatoraWithdrawReview? WithdrawReview { get; set; }
+
+        public SatoraWithdrawResult? WithdrawResult { get; set; }
     }
 }

@@ -6,11 +6,16 @@ using BTCPayServer.Payments;
 using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Services.Stores;
 using BTCPayServer.Data;
+using BTCPayServer.Lightning;
 using Microsoft.EntityFrameworkCore;
 using NBitcoin;
+using NBitcoin.Payment;
 using Newtonsoft.Json.Linq;
 using Satora.Sdk;
+using BTCPayServer.Rating;
+using BTCPayServer.Services.Rates;
 using uniffi.satora_sdk_ffi;
+using SatoraBitcoinNetwork = uniffi.satora_sdk_ffi.BitcoinNetwork;
 
 namespace BTCPayServer.Plugins.Satora.Services
 {
@@ -19,7 +24,10 @@ namespace BTCPayServer.Plugins.Satora.Services
         ILogger<SatoraPluginService> logger,
         SatoraService satoraService,
         SatoraSettlementService settlementService,
-        StoreRepository storeRepository)
+        StoreRepository storeRepository,
+        RateFetcher rateFetcher,
+        DefaultRulesCollection defaultRules,
+        BTCPayNetworkProvider networkProvider)
     {
 
         public async Task<SatoraSettings> GetStoreSettings(string storeId)
@@ -67,9 +75,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                     .OrderByDescending(a => a.DateT)
                     .ToListAsync();
 
-                ArkadeBalance walletBalance = null;
-                if (!string.IsNullOrEmpty(settings.Seed))
-                    walletBalance = await satoraService.GetArkadeBalanceAsync(settings.Seed);
+                var walletBalance = await GetWalletBalance(settings);
 
                 return new SatoraModel { Settings = settings, Transactions = txs, WalletBalance = walletBalance };
             }
@@ -78,6 +84,303 @@ namespace BTCPayServer.Plugins.Satora.Services
                 logger.LogError(e, "SatoraPlugin:GetStoreData()");
                 throw;
             }
+        }
+
+        public async Task<SatoraWalletBalance?> GetWalletBalance(string storeId, CancellationToken cancellationToken = default)
+        {
+            var settings = await GetStoreSettings(storeId);
+            return await GetWalletBalance(settings, cancellationToken);
+        }
+
+        private async Task<SatoraWalletBalance?> GetWalletBalance(SatoraSettings settings, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrEmpty(settings.Seed))
+                return null;
+
+            var arkadeBalance = await satoraService.GetArkadeBalanceAsync(settings.Seed);
+            var balance = new SatoraWalletBalance
+            {
+                ConfirmedSats = arkadeBalance.confirmedSats,
+                PreConfirmedSats = arkadeBalance.preConfirmedSats,
+                RecoverableSats = arkadeBalance.recoverableSats,
+                ConfirmedBtc = SatsToBtc(arkadeBalance.confirmedSats),
+                PreConfirmedBtc = SatsToBtc(arkadeBalance.preConfirmedSats),
+                RecoverableBtc = SatsToBtc(arkadeBalance.recoverableSats),
+                RefreshedAt = DateTimeOffset.UtcNow
+            };
+
+            await AddFiatValue(settings.StoreId, balance, cancellationToken);
+            return balance;
+        }
+
+        private async Task AddFiatValue(string storeId, SatoraWalletBalance balance, CancellationToken cancellationToken)
+        {
+            var store = await storeRepository.FindStore(storeId);
+            if (store is null)
+            {
+                balance.FiatError = "Store not found.";
+                return;
+            }
+
+            var storeBlob = store.GetStoreBlob();
+            var fiatCurrency = storeBlob.DefaultCurrency;
+            balance.FiatCurrency = fiatCurrency;
+
+            if (string.Equals(fiatCurrency, "BTC", StringComparison.OrdinalIgnoreCase))
+            {
+                balance.BtcFiatRate = 1m;
+                balance.ConfirmedFiat = balance.ConfirmedBtc;
+                balance.PreConfirmedFiat = balance.PreConfirmedBtc;
+                balance.RecoverableFiat = balance.RecoverableBtc;
+                return;
+            }
+
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                cts.CancelAfter(TimeSpan.FromSeconds(5));
+                var rateResult = await rateFetcher.FetchRate(
+                    new CurrencyPair("BTC", fiatCurrency),
+                    storeBlob.GetRateRules(defaultRules),
+                    new StoreIdRateContext(storeId),
+                    cts.Token);
+
+                if (rateResult.BidAsk is null)
+                {
+                    var errors = rateResult.Errors is null
+                        ? string.Empty
+                        : string.Join(", ", rateResult.Errors.OfType<object>());
+                    balance.FiatError = string.IsNullOrEmpty(errors)
+                        ? rateResult.EvaluatedRule
+                        : $"{rateResult.EvaluatedRule} ({errors})";
+                    return;
+                }
+
+                var rate = rateResult.BidAsk.Center;
+                balance.BtcFiatRate = rate;
+                balance.ConfirmedFiat = balance.ConfirmedBtc * rate;
+                balance.PreConfirmedFiat = balance.PreConfirmedBtc * rate;
+                balance.RecoverableFiat = balance.RecoverableBtc * rate;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "SatoraPlugin:AddFiatValue(): failed to fetch BTC/{FiatCurrency} rate for store {StoreId}", fiatCurrency, storeId);
+                balance.FiatError = ex.Message;
+            }
+        }
+
+        private static decimal SatsToBtc(ulong sats)
+        {
+            return sats / 100_000_000m;
+        }
+
+        public async Task<SatoraWithdrawReview> ReviewWithdrawAsync(SatoraWithdrawRequest request, CancellationToken cancellationToken = default)
+        {
+            request.Destination = request.Destination?.Trim() ?? string.Empty;
+            var review = new SatoraWithdrawReview
+            {
+                Request = request,
+                NormalizedDestination = request.Destination
+            };
+
+            var settings = await GetStoreSettings(request.StoreId);
+            if (!settings.Enabled || string.IsNullOrEmpty(settings.Seed))
+                return WithdrawError(review, "Satora wallet is not enabled for this store.");
+
+            var network = GetBitcoinNetwork();
+            DetectWithdrawDestination(review, network);
+            if (review.DestinationType == SatoraWithdrawDestinationType.Unknown)
+                return WithdrawError(review, "Destination must be an Arkade address, BOLT11 invoice, LNURL, Lightning address, Bitcoin address, or BIP21 URI.");
+
+            var requestedAmount = request.AmountBtc;
+            if (review.DestinationType == SatoraWithdrawDestinationType.BitcoinOnChain)
+                requestedAmount ??= TryGetBip21Amount(request.Destination, network);
+
+            if (review.DestinationType == SatoraWithdrawDestinationType.LightningInvoice)
+            {
+                var invoice = BOLT11PaymentRequest.Parse(review.NormalizedDestination, network.NBitcoinNetwork);
+                if (invoice.ExpiryDate <= DateTimeOffset.UtcNow)
+                    return WithdrawError(review, "The BOLT11 invoice has expired.");
+                if (invoice.MinimumAmount > LightMoney.Zero)
+                    requestedAmount ??= invoice.MinimumAmount.ToUnit(LightMoneyUnit.BTC);
+            }
+
+            if (requestedAmount is null || requestedAmount <= 0)
+                return WithdrawError(review, "Enter an amount greater than zero. Fixed-amount BOLT11 invoices and BIP21 URIs may provide the amount automatically.");
+
+            review.AmountBtc = requestedAmount.Value;
+            review.AmountSats = BtcToSats(requestedAmount.Value);
+            if (review.AmountSats == 0)
+                return WithdrawError(review, "Amount is below 1 sat.");
+
+            var balance = await GetWalletBalance(settings, cancellationToken);
+            review.AvailableSats = balance?.ConfirmedSats ?? 0;
+            if (review.AmountSats > review.AvailableSats)
+                return WithdrawError(review, $"Insufficient confirmed Arkade balance. Available: {review.AvailableSats} sats.");
+
+            review.FeeDescription = FeeDescription(review.DestinationType);
+            review.CanExecute = review.DestinationType is not SatoraWithdrawDestinationType.BitcoinOnChain;
+            if (!review.CanExecute)
+                // TODO: Enable this when the local Satora SDK exposes Arkade-to-on-chain BTC withdrawal/exit.
+                review.Error = "On-chain Bitcoin withdrawal was detected, but the local Satora SDK does not expose an Arkade-to-on-chain exit/send API yet.";
+            return review;
+        }
+
+        public async Task<SatoraWithdrawResult> ExecuteWithdrawAsync(SatoraWithdrawRequest request, CancellationToken cancellationToken = default)
+        {
+            var review = await ReviewWithdrawAsync(request, cancellationToken);
+            if (!review.CanExecute)
+                throw new InvalidOperationException(review.Error ?? "Withdraw request cannot be executed.");
+
+            var settings = await GetStoreSettings(request.StoreId);
+            if (string.IsNullOrEmpty(settings.Seed))
+                throw new InvalidOperationException("Satora wallet is not enabled for this store.");
+
+            var network = ToSatoraNetwork(GetBitcoinNetwork().NBitcoinNetwork);
+            if (review.DestinationType == SatoraWithdrawDestinationType.Arkade)
+            {
+                var txid = await satoraService.SendArkadeAsync(review.NormalizedDestination, review.AmountSats, settings.Seed, network, cancellationToken);
+                return new SatoraWithdrawResult
+                {
+                    DestinationType = review.DestinationType,
+                    DestinationTypeDisplay = review.DestinationTypeDisplay,
+                    Destination = review.NormalizedDestination,
+                    AmountSats = review.AmountSats,
+                    AmountBtc = review.AmountBtc,
+                    TransactionId = txid,
+                    Status = "Sent",
+                    FeeDescription = review.FeeDescription
+                };
+            }
+
+            return await satoraService.SendLightningAsync(review, settings.Seed, network, cancellationToken);
+        }
+
+        private void DetectWithdrawDestination(SatoraWithdrawReview review, BTCPayNetwork network)
+        {
+            var destination = review.NormalizedDestination;
+            if (string.IsNullOrWhiteSpace(destination))
+            {
+                review.DestinationType = SatoraWithdrawDestinationType.Unknown;
+                review.DestinationTypeDisplay = "Unknown";
+                return;
+            }
+
+            if (destination.StartsWith("lightning:", StringComparison.OrdinalIgnoreCase))
+            {
+                destination = destination["lightning:".Length..];
+                review.NormalizedDestination = destination;
+            }
+
+            if (destination.StartsWith("ark1", StringComparison.OrdinalIgnoreCase) ||
+                destination.StartsWith("tark1", StringComparison.OrdinalIgnoreCase))
+            {
+                review.DestinationType = SatoraWithdrawDestinationType.Arkade;
+                review.DestinationTypeDisplay = "Arkade";
+                return;
+            }
+
+            if (BOLT11PaymentRequest.TryParse(destination, out var invoice, network.NBitcoinNetwork) && invoice is not null)
+            {
+                review.DestinationType = SatoraWithdrawDestinationType.LightningInvoice;
+                review.DestinationTypeDisplay = "Lightning invoice";
+                return;
+            }
+
+            if (destination.StartsWith("lnurl1", StringComparison.OrdinalIgnoreCase))
+            {
+                review.DestinationType = SatoraWithdrawDestinationType.Lnurl;
+                review.DestinationTypeDisplay = "LNURL";
+                return;
+            }
+
+            if (destination.Contains('@') && Uri.CheckHostName(destination.Split('@').LastOrDefault() ?? string.Empty) != UriHostNameType.Unknown)
+            {
+                review.DestinationType = SatoraWithdrawDestinationType.LightningAddress;
+                review.DestinationTypeDisplay = "Lightning address";
+                return;
+            }
+
+            try
+            {
+                var bip21 = new BitcoinUrlBuilder(destination, network.NBitcoinNetwork);
+                if (bip21.Address is not null)
+                {
+                    review.DestinationType = SatoraWithdrawDestinationType.BitcoinOnChain;
+                    review.DestinationTypeDisplay = "Bitcoin on-chain";
+                    review.NormalizedDestination = bip21.Address.ToString();
+                    return;
+                }
+            }
+            catch (FormatException)
+            {
+            }
+
+            try
+            {
+                review.NormalizedDestination = BitcoinAddress.Create(destination, network.NBitcoinNetwork).ToString();
+                review.DestinationType = SatoraWithdrawDestinationType.BitcoinOnChain;
+                review.DestinationTypeDisplay = "Bitcoin on-chain";
+            }
+            catch
+            {
+                review.DestinationType = SatoraWithdrawDestinationType.Unknown;
+                review.DestinationTypeDisplay = "Unknown";
+            }
+        }
+
+        private static decimal? TryGetBip21Amount(string destination, BTCPayNetwork network)
+        {
+            try
+            {
+                return new BitcoinUrlBuilder(destination, network.NBitcoinNetwork).Amount?.ToDecimal(MoneyUnit.BTC);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private BTCPayNetwork GetBitcoinNetwork()
+        {
+            return networkProvider.GetNetwork<BTCPayNetwork>("BTC")
+                ?? networkProvider.DefaultNetwork as BTCPayNetwork
+                ?? throw new InvalidOperationException("BTC network is not configured.");
+        }
+
+        private static SatoraWithdrawReview WithdrawError(SatoraWithdrawReview review, string error)
+        {
+            review.Error = error;
+            review.CanExecute = false;
+            review.FeeDescription = "Not available until the request is valid.";
+            return review;
+        }
+
+        private static ulong BtcToSats(decimal btc)
+        {
+            return checked((ulong)decimal.Ceiling(btc * 100_000_000m));
+        }
+
+        private static string FeeDescription(SatoraWithdrawDestinationType destinationType)
+        {
+            return destinationType switch
+            {
+                SatoraWithdrawDestinationType.Arkade => "Native Arkade send. The current SDK does not expose a separate pre-send fee estimate.",
+                SatoraWithdrawDestinationType.LightningInvoice or SatoraWithdrawDestinationType.LightningAddress or SatoraWithdrawDestinationType.Lnurl =>
+                    "Arkade-to-Lightning swap. The exact funding amount and fee difference are returned by Satora at execution.",
+                SatoraWithdrawDestinationType.BitcoinOnChain =>
+                    "Arkade-to-on-chain exit requires SDK support before fees can be quoted.",
+                _ => "Not available."
+            };
+        }
+
+        private static SatoraBitcoinNetwork ToSatoraNetwork(Network network)
+        {
+            if (network == Network.Main)
+                return SatoraBitcoinNetwork.Mainnet;
+            if (network == Network.RegTest)
+                return SatoraBitcoinNetwork.Regtest;
+            return SatoraBitcoinNetwork.Testnet;
         }
 
         public async Task UpdateSettings(SatoraSettings settings)

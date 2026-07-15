@@ -131,40 +131,191 @@
 
     @if (Model.WalletBalance != null)
     {
-        var confirmedBtc    = Model.WalletBalance.confirmedSats    / 100_000_000m;
-        var preConfirmedBtc = Model.WalletBalance.preConfirmedSats / 100_000_000m;
-        var recoverableBtc  = Model.WalletBalance.recoverableSats  / 100_000_000m;
+        var balance = Model.WalletBalance;
+        var refreshedAt = balance.RefreshedAt.ToLocalTime();
+        string fiatValue(decimal? value) => value is decimal amount
+            ? $"{amount:0.00} {balance.FiatCurrency}"
+            : "Unavailable";
 
-        <div class="widget store-wallet-balance">
+        <div id="SatoraWalletBalance" class="widget store-wallet-balance" data-refresh-url="@Url.Action("WalletBalance", "SatoraPlugin", new { storeId = Model.Settings.StoreId })">
             <div class="d-flex gap-3 align-items-center justify-content-between mb-2">
-                <h6>Arkade Wallet Balance</h6>
+                <div>
+                    <h6 class="mb-0">Arkade Wallet Balance</h6>
+                    <small class="text-secondary">
+                        Refreshed <span data-balance-refreshed-at>@refreshedAt.ToString("g")</span>
+                    </small>
+                </div>
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-balance-refresh title="Refresh wallet balance">
+                    <vc:icon symbol="actions-refresh" class="icon-refresh" />
+                    Refresh
+                </button>
             </div>
             <div class="balances d-flex flex-wrap gap-4">
                 <div class="balance">
-                    <div class="d-flex align-items-baseline gap-1">
-                        <h3 class="d-inline-block me-1" data-balance="@confirmedBtc" data-sensitive>@confirmedBtc.ToString("0.########")</h3>
-                        <span class="text-secondary fw-semibold text-nowrap"><span class="currency">BTC</span> confirmed</span>
+                    <div class="d-flex align-items-baseline gap-1 mb-1">
+                        <h3 class="d-inline-block me-1" data-balance-btc="confirmed" data-sensitive>@balance.ConfirmedBtc.ToString("0.########")</h3>
+                        <span class="text-secondary fw-semibold text-nowrap">BTC confirmed</span>
                     </div>
+                    <div class="text-secondary" data-balance-fiat="confirmed" data-sensitive>@fiatValue(balance.ConfirmedFiat)</div>
                 </div>
 
                 <div class="balance">
-                    <div class="d-flex align-items-baseline gap-1">
-                        <h3 class="d-inline-block me-1" data-balance="@preConfirmedBtc" data-sensitive>@preConfirmedBtc.ToString("0.########")</h3>
-                        <span class="text-secondary text-nowrap"><span class="currency">BTC</span> pre-confirmed</span>
+                    <div class="d-flex align-items-baseline gap-1 mb-1">
+                        <h3 class="d-inline-block me-1" data-balance-btc="preConfirmed" data-sensitive>@balance.PreConfirmedBtc.ToString("0.########")</h3>
+                        <span class="text-secondary text-nowrap">BTC pre-confirmed</span>
                     </div>
+                    <div class="text-secondary" data-balance-fiat="preConfirmed" data-sensitive>@fiatValue(balance.PreConfirmedFiat)</div>
                 </div>
 
                 <div class="balance">
-                    <div class="d-flex align-items-baseline gap-1">
-                        <h3 class="d-inline-block me-1" data-balance="@recoverableBtc" data-sensitive>@recoverableBtc.ToString("0.########")</h3>
-                        <span class="text-secondary text-nowrap"><span class="currency">BTC</span> recoverable</span>
+                    <div class="d-flex align-items-baseline gap-1 mb-1">
+                        <h3 class="d-inline-block me-1" data-balance-btc="recoverable" data-sensitive>@balance.RecoverableBtc.ToString("0.########")</h3>
+                        <span class="text-secondary text-nowrap">BTC recoverable</span>
                     </div>
+                    <div class="text-secondary" data-balance-fiat="recoverable" data-sensitive>@fiatValue(balance.RecoverableFiat)</div>
                 </div>
             </div>
+            <div class="text-warning small mt-3 @(string.IsNullOrEmpty(balance.FiatError) ? "d-none" : "")" data-balance-fiat-error>
+                @balance.FiatError
+            </div>
         </div>
+        <script>
+            (function () {
+                const widget = document.getElementById('SatoraWalletBalance');
+                if (!widget) return;
+
+                const refreshButton = widget.querySelector('[data-balance-refresh]');
+                const refreshedAt = widget.querySelector('[data-balance-refreshed-at]');
+                const fiatError = widget.querySelector('[data-balance-fiat-error]');
+                const btcFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 });
+                const fiatFormatter = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+                function formatFiat(value, currency) {
+                    return value === null || value === undefined ? 'Unavailable' : `${fiatFormatter.format(Number(value))} ${currency}`;
+                }
+
+                function render(balance) {
+                    widget.querySelector('[data-balance-btc="confirmed"]').textContent = btcFormatter.format(Number(balance.confirmedBtc));
+                    widget.querySelector('[data-balance-btc="preConfirmed"]').textContent = btcFormatter.format(Number(balance.preConfirmedBtc));
+                    widget.querySelector('[data-balance-btc="recoverable"]').textContent = btcFormatter.format(Number(balance.recoverableBtc));
+                    widget.querySelector('[data-balance-fiat="confirmed"]').textContent = formatFiat(balance.confirmedFiat, balance.fiatCurrency);
+                    widget.querySelector('[data-balance-fiat="preConfirmed"]').textContent = formatFiat(balance.preConfirmedFiat, balance.fiatCurrency);
+                    widget.querySelector('[data-balance-fiat="recoverable"]').textContent = formatFiat(balance.recoverableFiat, balance.fiatCurrency);
+                    refreshedAt.textContent = new Date(balance.refreshedAt).toLocaleString();
+
+                    if (balance.fiatError) {
+                        fiatError.textContent = balance.fiatError;
+                        fiatError.classList.remove('d-none');
+                    } else {
+                        fiatError.textContent = '';
+                        fiatError.classList.add('d-none');
+                    }
+                }
+
+                refreshButton.addEventListener('click', async () => {
+                    refreshButton.disabled = true;
+                    try {
+                        const response = await fetch(widget.dataset.refreshUrl, { headers: { Accept: 'application/json' } });
+                        if (!response.ok) throw new Error(`Balance refresh failed (${response.status})`);
+                        render(await response.json());
+                    } catch (error) {
+                        fiatError.textContent = error.message;
+                        fiatError.classList.remove('d-none');
+                    } finally {
+                        refreshButton.disabled = false;
+                    }
+                });
+            })();
+        </script>
         <div style="height:20px"></div><br/>
     }
 
+
+    <div permission="@Policies.CanManagePayouts" class="mb-4">
+        <h4>Withdraw</h4>
+        <form method="post" asp-action="ReviewWithdraw" asp-route-storeId="@Model.Settings.StoreId" class="mb-3">
+            @Html.AntiForgeryToken()
+            <input name="StoreId" value="@Model.Settings.StoreId" type="hidden" />
+            <div class="form-group">
+                <label for="withdrawDestination" class="form-label">Destination</label>
+                <input id="withdrawDestination" name="Destination" class="form-control" value="@Model.WithdrawRequest.Destination" autocomplete="off" spellcheck="false" />
+                <div class="form-text">Arkade address, BOLT11 invoice, LNURL, Lightning address, Bitcoin address, or BIP21 URI.</div>
+            </div>
+            <div class="form-group">
+                <label for="withdrawAmount" class="form-label">Amount (BTC)</label>
+                <input id="withdrawAmount" name="AmountBtc" class="form-control w-auto" value="@(Model.WithdrawRequest.AmountBtc?.ToString("0.########"))" inputmode="decimal" />
+                <div class="form-text">Required for Arkade, LNURL, Lightning address, and amountless invoices. Fixed BOLT11 invoices and BIP21 URIs can provide the amount.</div>
+            </div>
+            <button type="submit" class="btn btn-primary">Review withdrawal</button>
+        </form>
+
+        @if (Model.WithdrawReview != null)
+        {
+            var review = Model.WithdrawReview;
+            <div class="border rounded p-3 mb-3">
+                <div class="d-flex flex-wrap gap-4">
+                    <div>
+                        <div class="text-secondary small">Destination type</div>
+                        <strong>@review.DestinationTypeDisplay</strong>
+                    </div>
+                    <div>
+                        <div class="text-secondary small">Amount</div>
+                        <strong>@review.AmountBtc.ToString("0.########") BTC</strong>
+                        <div class="text-secondary small">@review.AmountSats sats</div>
+                    </div>
+                    <div>
+                        <div class="text-secondary small">Confirmed balance</div>
+                        <strong>@((review.AvailableSats / 100_000_000m).ToString("0.########")) BTC</strong>
+                        <div class="text-secondary small">@review.AvailableSats sats</div>
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <div class="text-secondary small">Destination</div>
+                    <code class="text-break">@review.NormalizedDestination</code>
+                </div>
+                <div class="mt-3">
+                    <div class="text-secondary small">Fees</div>
+                    <span>@review.FeeDescription</span>
+                </div>
+                @if (!string.IsNullOrEmpty(review.Error))
+                {
+                    <div class="alert alert-warning mt-3 mb-0">@review.Error</div>
+                }
+                @if (review.CanExecute)
+                {
+                    <form method="post" asp-action="ExecuteWithdraw" asp-route-storeId="@Model.Settings.StoreId" class="mt-3">
+                        @Html.AntiForgeryToken()
+                        <input name="StoreId" value="@Model.Settings.StoreId" type="hidden" />
+                        <input name="Destination" value="@review.Request.Destination" type="hidden" />
+                        <input name="AmountBtc" value="@review.AmountBtc.ToString(System.Globalization.CultureInfo.InvariantCulture)" type="hidden" />
+                        <button type="submit" class="btn btn-danger">Confirm and withdraw</button>
+                    </form>
+                }
+            </div>
+        }
+
+        @if (Model.WithdrawResult != null)
+        {
+            var result = Model.WithdrawResult;
+            <div class="alert alert-success">
+                <div><strong>@result.DestinationTypeDisplay withdrawal submitted.</strong></div>
+                <div>@result.AmountBtc.ToString("0.########") BTC (@result.AmountSats sats)</div>
+                @if (!string.IsNullOrEmpty(result.TransactionId))
+                {
+                    <div>Arkade tx: <code class="text-break">@result.TransactionId</code></div>
+                }
+                @if (!string.IsNullOrEmpty(result.SwapId))
+                {
+                    <div>Swap: <code class="text-break">@result.SwapId</code></div>
+                }
+                <div>Status: @result.Status</div>
+                @if (!string.IsNullOrEmpty(result.FeeDescription))
+                {
+                    <div>@result.FeeDescription</div>
+                }
+            </div>
+        }
+    </div>
 
 
     <h4>Satora Customers Transactions</h4>
