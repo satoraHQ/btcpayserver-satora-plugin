@@ -15,25 +15,7 @@ namespace BTCPayServer.Plugins.Satora.Controllers
             var rep = new SwapResponse();
             try
             {
-                var settings = await pluginService.GetStoreSettings(storeId);
-
-                req.BtcNetwork = "ARKADE";
-                req.BtcDestination = await satoraService.GetArkadeAddressAsync(settings.Seed);
-
-                rep = await satoraService.CreateSwapAsync(req, settings.Seed);
-
-                await pluginService.AddStoreTransaction(new SatoraTx
-                {
-                    StoreId = storeId,
-                    Blockchain = req.NetworkFrom.ToString(),
-                    Stablecoin = req.CryptoFrom.ToString(),
-                    DateT = DateTime.UtcNow,
-                    BTCAmount = req.BtcAmount,
-                    TxID = rep.SwapId,
-                    BTCPayInvoiceId = req.BtcPayInvoiceId,
-                    InvoiceArkadeAddress = req.BtcDestination
-                }); 
-                rep.Success = true;
+                rep = await pluginService.CreateCheckoutSwapAsync(storeId, req);
             }
             catch (Exception ex)
             {

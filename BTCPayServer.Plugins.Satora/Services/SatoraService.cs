@@ -37,7 +37,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                     _ => new TokenId.Other($"{req.CryptoFrom}-{req.NetworkFrom}")
                 };
 
-                QuoteAmount quoteAmount = new QuoteAmount.Target((ulong)(req.BtcAmount * 100000000));
+                QuoteAmount quoteAmount = new QuoteAmount.Target((ulong)(req.BtcAmount * 100000000m));
 
                 ChainId chainTo = req.BtcNetwork switch
                 {
@@ -58,32 +58,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                 using var client = new global::Satora.Sdk.Client(seedPhrase);
                 var apiSwap = await client.CreateSwapAsync(chainFrom, tokenFrom, chainTo, new TokenId.Btc(), quoteAmount, addressTo, true);
 
-                string? sDepositAddress = apiSwap.Funding switch
-                {
-                    SwapFunding.Gasless gasless => gasless.depositAddress,
-                    _ => null
-                } ?? throw new Exception("Failed to retrieve deposit address");
-
-                int decimals = req.CryptoFrom switch
-                {
-                    Stablecoins.EURC  => 6,
-                    Stablecoins.USDC  => 6,
-                    Stablecoins.USDT  => 6,
-                    Stablecoins.USDT0 => 6,
-                    Stablecoins.WBTC  => 8,
-                    _ => 18
-                };
-
-                var rawAmount = double.Parse(apiSwap.DepositAmount, CultureInfo.InvariantCulture);
-
-                var swap = new SwapResponse
-                {
-                    SwapId        = apiSwap.Id,
-                    FromAddress   = sDepositAddress,
-                    FromAmount    = (float)(rawAmount / Math.Pow(10, decimals)),
-                    Success       = true,
-                    StatusMessage = "Swap created successfully"
-                };
+                var swap = ToSwapResponse(apiSwap, req.CryptoFrom, "Swap created successfully");
                 logger.LogInformation("Satora Swap Created : {SwapId} {FromAmount} {From} -> {To}",
                     swap.SwapId, swap.FromAmount, $"{req.CryptoFrom}-{req.NetworkFrom}", req.BtcNetwork);
                 return swap;
@@ -94,6 +69,52 @@ namespace BTCPayServer.Plugins.Satora.Services
                     ex.Message, $"{req.CryptoFrom}-{req.NetworkFrom}", req.BtcNetwork);
                 throw;
             }
+        }
+
+        public async Task<SwapResponse> GetSwapPaymentDetailsAsync(string swapId, Stablecoins cryptoFrom, string seedPhrase)
+        {
+            try
+            {
+                using var client = new global::Satora.Sdk.Client(seedPhrase);
+                var apiSwap = await client.GetSwapAsync(swapId);
+                return ToSwapResponse(apiSwap, cryptoFrom, "Existing swap reused");
+            }
+            catch (Exception ex)
+            {
+                logger.LogError("SatoraPlugin.GetSwapPaymentDetailsAsync(): {Message} - {SwapId}", ex.Message, swapId);
+                throw;
+            }
+        }
+
+        private static SwapResponse ToSwapResponse(global::Satora.Sdk.SwapDetails apiSwap, Stablecoins cryptoFrom, string statusMessage)
+        {
+            string? sDepositAddress = apiSwap.Funding switch
+            {
+                SwapFunding.Gasless gasless => gasless.depositAddress,
+                _ => null
+            } ?? throw new Exception("Failed to retrieve deposit address");
+
+            int decimals = cryptoFrom switch
+            {
+                Stablecoins.EURC  => 6,
+                Stablecoins.USDC  => 6,
+                Stablecoins.USDT  => 6,
+                Stablecoins.USDT0 => 6,
+                Stablecoins.WBTC  => 8,
+                Stablecoins.tBTC  => 8,
+                _ => 18
+            };
+
+            var rawAmount = double.Parse(apiSwap.DepositAmount, CultureInfo.InvariantCulture);
+
+            return new SwapResponse
+            {
+                SwapId        = apiSwap.Id,
+                FromAddress   = sDepositAddress,
+                FromAmount    = (float)(rawAmount / Math.Pow(10, decimals)),
+                Success       = true,
+                StatusMessage = statusMessage
+            };
         }
 
         public async Task<string> GetSwapInfoAsync(string id, string seedPhrase)
