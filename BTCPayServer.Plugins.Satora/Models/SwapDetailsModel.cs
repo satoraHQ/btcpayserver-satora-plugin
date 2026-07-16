@@ -11,6 +11,8 @@
         public string StoreId { get; set; } = "";
         public SatoraTx? LocalTx { get; set; }
 
+        public SatoraSwapStatusView StatusView { get; set; } = new();
+
         // Backend-side fields. All null when the backend lookup fails;
         // the error is surfaced in BackendError.
         public string? BackendStatus { get; set; }

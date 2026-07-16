@@ -213,6 +213,22 @@ namespace BTCPayServer.Plugins.Satora.Controllers
             }
         }
 
+        [HttpPost("swap/{swapId}/retry")]
+        public async Task<IActionResult> RetrySwap([FromRoute] string storeId, [FromRoute] string swapId)
+        {
+            try
+            {
+                var (action, status) = await pluginService.RetrySwapAsync(storeId, swapId);
+                TempData[WellKnownTempData.SuccessMessage] = $"Satora swap retry ran: {action}. Current status: {status.DisplayStatus} ({status.RawStatus}).";
+            }
+            catch (Exception ex)
+            {
+                TempData[WellKnownTempData.ErrorMessage] = $"Satora swap retry failed: {ex.Message}";
+            }
+
+            return RedirectToAction("Index", new { storeId });
+        }
+
         [HttpGet("swap/{swapId}")]
         public async Task<IActionResult> SwapDetails([FromRoute] string storeId, [FromRoute] string swapId)
         {

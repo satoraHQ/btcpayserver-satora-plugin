@@ -318,21 +318,21 @@
     </div>
 
 
-    <h4>Satora Customers Transactions</h4>
+    <h4>Satora swaps</h4>
 
-    @if (!Model.Transactions.Any())
+    @if (!Model.Swaps.Any())
     {
         <p>
-            <i>No Satora transactions for this store...</i>
+            <i>No Satora swaps for this store...</i>
         </p>
     }
     else
     {
         var page = Context.Request.Query["page"].Count > 0 ? int.Parse(Context.Request.Query["page"]) : 1;
         var pageSize = 20;
-        var totalItems = Model.Transactions.Count();
+        var totalItems = Model.Swaps.Count();
         var totalPages = (int)Math.Ceiling(totalItems / (double)pageSize);
-        var pagedTransactions = Model.Transactions
+        var pagedSwaps = Model.Swaps
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToList();
@@ -348,18 +348,23 @@
                         <th class="text-nowrap">Blockchain</th>
                         <th class="text-nowrap">Amount (BTC)</th>
                         <th class="text-nowrap">Invoice</th>
+                        <th class="text-nowrap">Recovery</th>
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (var item in pagedTransactions)
+                    @foreach (var swap in pagedSwaps)
                     {
+                        var item = swap.LocalTx;
+                        var status = swap.Status;
                         <tr class="mass-action-row item">
                             <td class="text-break align-middle invoiceId-col">
                                 <a asp-action="SwapDetails" asp-route-storeId="@Model.Settings.StoreId" asp-route-swapId="@item.TxID" class="badge badge-settled" title="Open swap details">@item.TxID</a>
                             </td>
-                            <td align="center">
-                                <div class="badge badge-expired" id="status-@item.TxID">@item.Status</div><br />
-                                <a href="#" onclick="GetSwapStatus('@item.TxID');return false;" title="Refresh status">
+                            <td class="align-middle">
+                                <div class="badge badge-@status.Severity" id="status-badge-@item.TxID">@status.DisplayStatus</div>
+                                <div class="small text-muted" id="status-raw-@item.TxID">@status.RawStatus</div>
+                                <div class="small @(status.NeedsManualAction ? "text-warning" : "text-muted")" id="status-hint-@item.TxID">@status.ActionHint</div>
+                                <a href="#" onclick="GetSwapStatus('@item.TxID');return false;" title="Refresh status" data-swap-live="@(!status.IsTerminal).ToString().ToLowerInvariant()" data-swap-id="@item.TxID">
                                     <vc:icon symbol="actions-refresh" class="icon-refresh" />
                                 </a>
                             </td>
@@ -378,6 +383,26 @@
                             <td class="text-break align-middle invoiceId-col">
                                 <a asp-controller="UIInvoice" asp-action="Invoice" asp-route-invoiceId="@item.BTCPayInvoiceId" class="text-break">@item.BTCPayInvoiceId</a>
                             </td>
+                            <td class="align-middle text-nowrap">
+                                @if (status.NeedsManualAction)
+                                {
+                                    <div class="badge badge-warning mb-2">Needs action</div>
+                                }
+                                @if (status.CanRetry)
+                                {
+                                    <form method="post" asp-action="RetrySwap" asp-route-storeId="@Model.Settings.StoreId" asp-route-swapId="@item.TxID" class="d-inline">
+                                        <button type="submit" class="btn btn-sm btn-secondary" title="@status.RetryUnavailableReason">Retry</button>
+                                    </form>
+                                }
+                                @if (!string.IsNullOrEmpty(status.RetryUnavailableReason))
+                                {
+                                    <div class="small text-muted">@status.RetryUnavailableReason</div>
+                                }
+                                @if (!status.CanRetry && !status.NeedsManualAction)
+                                {
+                                    <span class="text-muted">No action</span>
+                                }
+                            </td>
                         </tr>
                     }
                 </tbody>
@@ -385,25 +410,44 @@
         </div>
         <script>
             function GetSwapStatus(swapId) {
-                $('#status-' + swapId).hide();
+                $('#status-badge-' + swapId).hide();
                 $.ajax({
                     url: 'Satora/GetSwapStatus',
                     type: 'GET',
                     data: { swapId: swapId },
                     success: function (data) {
                         if (data) {
-                            $('#status-' + swapId).text(data);
+                            var displayStatus = data.displayStatus || data.DisplayStatus;
+                            var rawStatus = data.rawStatus || data.RawStatus;
+                            var severity = data.severity || data.Severity || 'secondary';
+                            var actionHint = data.actionHint || data.ActionHint || '';
+                            var needsManualAction = data.needsManualAction ?? data.NeedsManualAction;
+
+                            $('#status-badge-' + swapId)
+                                .removeClass()
+                                .addClass('badge badge-' + severity)
+                                .text(displayStatus);
+                            $('#status-raw-' + swapId).text(rawStatus);
+                            $('#status-hint-' + swapId)
+                                .removeClass('small text-warning text-muted')
+                                .addClass('small ' + (needsManualAction ? 'text-warning' : 'text-muted'))
+                                .text(actionHint);
                         } else {
                             console.log('No status returned for swap ID:', swapId);
                         }
-                        $('#status-' + swapId).show();
+                        $('#status-badge-' + swapId).show();
                     },
                     error: function (dataError) {
                         console.log('Error fetching swap status:', dataError);
-                        $('#status-' + swapId).show();
+                        $('#status-badge-' + swapId).show();
                     }
                 });
             }
+
+            $('[data-swap-live="true"]').each(function () {
+                var swapId = $(this).data('swap-id');
+                window.setInterval(function () { GetSwapStatus(swapId); }, 30000);
+            });
 
         </script>
         <nav aria-label="Page navigation" class="mt-3">

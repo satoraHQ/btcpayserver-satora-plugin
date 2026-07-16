@@ -77,7 +77,13 @@ namespace BTCPayServer.Plugins.Satora.Services
 
                 var walletBalance = await GetWalletBalance(settings);
 
-                return new SatoraModel { Settings = settings, Transactions = txs, WalletBalance = walletBalance };
+                return new SatoraModel
+                {
+                    Settings = settings,
+                    Transactions = txs,
+                    Swaps = txs.Select(CreateSwapListItem).ToList(),
+                    WalletBalance = walletBalance
+                };
             }
             catch (Exception e)
             {
@@ -507,6 +513,130 @@ namespace BTCPayServer.Plugins.Satora.Services
                 await SyncStorePaymentMethodConfig(setting);
         }
 
+        private static SatoraSwapListItem CreateSwapListItem(SatoraTx tx)
+        {
+            return new SatoraSwapListItem
+            {
+                LocalTx = tx,
+                Status = MapSwapStatus(tx.Status, tx.DateT)
+            };
+        }
+
+        private static SatoraSwapStatusView MapSwapStatus(string? rawStatus, DateTime? createdAt)
+        {
+            var status = string.IsNullOrWhiteSpace(rawStatus) ? "Pending" : rawStatus;
+            var age = createdAt.HasValue ? DateTime.UtcNow - createdAt.Value.ToUniversalTime() : TimeSpan.Zero;
+            var stale = IsNonTerminalStatus(status) && age > TimeSpan.FromMinutes(30);
+
+            var view = status switch
+            {
+                "Pending" => new SatoraSwapStatusView
+                {
+                    RawStatus = status,
+                    DisplayStatus = "Waiting for deposit",
+                    Severity = stale ? "warning" : "info",
+                    ActionHint = stale
+                        ? "No deposit has been detected for more than 30 minutes. Check the customer payment or retry the watcher step."
+                        : "Waiting for the customer stablecoin deposit."
+                },
+                "ClientFundingSeen" => new SatoraSwapStatusView
+                {
+                    RawStatus = status,
+                    DisplayStatus = "Deposit seen",
+                    Severity = stale ? "warning" : "info",
+                    ActionHint = stale
+                        ? "Deposit was seen but has not progressed. Retry can re-check and fund the swap if the deposit is sufficient."
+                        : "Deposit is visible; waiting for confirmation and funding."
+                },
+                "ClientFunded" => new SatoraSwapStatusView
+                {
+                    RawStatus = status,
+                    DisplayStatus = "Deposit confirmed",
+                    Severity = stale ? "warning" : "info",
+                    ActionHint = stale
+                        ? "Deposit is confirmed but the server side has not funded yet. Retry refreshes the state."
+                        : "Waiting for Satora server funding."
+                },
+                "ServerFunded" => new SatoraSwapStatusView
+                {
+                    RawStatus = status,
+                    DisplayStatus = "Ready to claim",
+                    Severity = "warning",
+                    ActionHint = "Swap is funded on the server side and needs the Arkade claim step."
+                },
+                "ClientRedeeming" => new SatoraSwapStatusView
+                {
+                    RawStatus = status,
+                    DisplayStatus = "Claim in progress",
+                    Severity = stale ? "warning" : "info",
+                    ActionHint = stale
+                        ? "Claim has been in progress for more than 30 minutes. Retry refreshes the claim state."
+                        : "Arkade claim is in progress."
+                },
+                "ClientRedeemed" => new SatoraSwapStatusView
+                {
+                    RawStatus = status,
+                    DisplayStatus = "Claimed",
+                    Severity = "success",
+                    ActionHint = "Arkade claim completed; waiting for final server redemption if needed.",
+                    IsTerminal = true
+                },
+                "ServerRedeemed" => new SatoraSwapStatusView
+                {
+                    RawStatus = status,
+                    DisplayStatus = "Complete",
+                    Severity = "success",
+                    ActionHint = "Swap completed.",
+                    IsTerminal = true
+                },
+                "ClientRefunded" => RecoveryStatus(status, "Refunded", "Client-side funds were refunded. Reconcile the invoice and swap state."),
+                "ClientFundedServerRefunded" => RecoveryStatus(status, "Needs retry", "Client funded, but server side is refunded. Retry should deliver funds to the BTC side once SDK recovery is exposed."),
+                "ClientRefundedServerFunded" => RecoveryStatus(status, "Needs retry", "Client side is refunded while server side remains funded. Retry should reconcile and deliver funds to the BTC side once SDK recovery is exposed."),
+                "ClientRefundedServerRefunded" => RecoveryStatus(status, "Refunded", "Both sides are refunded. Reconcile the invoice and swap state."),
+                "Expired" => RecoveryStatus(status, "Expired", "Swap expired. Retry/recovery should be handled by the SDK contract manager; do not route merchant recovery to an EVM refund wallet."),
+                "ClientInvalidFunded" => RecoveryStatus(status, "Invalid funding", "Customer funding did not match the expected swap terms. Retry/recovery should be handled by the SDK contract manager."),
+                "ClientFundedTooLate" => RecoveryStatus(status, "Funded too late", "Customer funded after expiry. Retry/recovery should be handled by the SDK contract manager."),
+                "ServerWontFund" => RecoveryStatus(status, "Server refused funding", "Satora server will not fund this swap. Retry/recovery should be handled by the SDK contract manager."),
+                "ClientRedeemedAndClientRefunded" => RecoveryStatus(status, "Redeemed and refunded", "Swap has both redeemed and refunded markers. Reconcile before changing the invoice."),
+                _ => RecoveryStatus(status, "Unknown status", "Unknown Satora status. Refresh or inspect the swap details before taking action.", canRetry: true, retryUnavailableReason: null)
+            };
+
+            view.NeedsManualAction = view.NeedsManualAction || stale;
+            view.CanRetry = view.CanRetry || (!view.IsTerminal && IsRetryableStatus(status));
+
+            return view;
+        }
+
+        private static SatoraSwapStatusView RecoveryStatus(
+            string status,
+            string displayStatus,
+            string actionHint,
+            bool canRetry = false,
+            string? retryUnavailableReason = "Retry is pending SDK/contract-manager recovery support for this terminal state.")
+        {
+            return new SatoraSwapStatusView
+            {
+                RawStatus = status,
+                DisplayStatus = displayStatus,
+                Severity = "danger",
+                ActionHint = actionHint,
+                IsTerminal = true,
+                NeedsManualAction = true,
+                CanRetry = canRetry,
+                RetryUnavailableReason = retryUnavailableReason
+            };
+        }
+
+        private static bool IsRetryableStatus(string status)
+        {
+            return status is "Pending" or "ClientFundingSeen" or "ClientFunded" or "ServerFunded" or "ClientRedeeming" or "ClientRedeemed";
+        }
+
+        private static bool IsNonTerminalStatus(string status)
+        {
+            return status is "Pending" or "ClientFundingSeen" or "ClientFunded" or "ServerFunded" or "ClientRedeeming";
+        }
+
         public async Task AddStoreTransaction(SatoraTx tx)
         {
             try
@@ -528,6 +658,9 @@ namespace BTCPayServer.Plugins.Satora.Services
             {
                 await using var _context = pluginDbContextFactory.CreateContext();
                 var dbSwap    = await _context.SatoraTransactions.FirstOrDefaultAsync(s => s.TxID == swapId);
+                if (dbSwap == null)
+                    return null;
+
                 var settings  = await _context.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == dbSwap.StoreId);
                 return settings?.Seed;
             }
@@ -538,21 +671,30 @@ namespace BTCPayServer.Plugins.Satora.Services
             }
         }
 
-        public async Task<string> DoGetSwapStatus(string swapId)
+        public async Task<SatoraSwapStatusView> DoGetSwapStatus(string swapId)
         {
             try
             {
                 await using var _context = pluginDbContextFactory.CreateContext();
                 var dbSwap      = await _context.SatoraTransactions.FirstOrDefaultAsync(s => s.TxID == swapId);
+                if (dbSwap == null)
+                    throw new InvalidOperationException("Swap was not found in the local Satora transaction table.");
+
                 var storeSettings = await _context.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == dbSwap.StoreId);
-                var status      = await satoraService.GetSwapInfoAsync(swapId, storeSettings.Seed);
+                if (storeSettings == null)
+                    throw new InvalidOperationException("Satora settings were not found for the swap's store.");
+                var seed = storeSettings.Seed;
+                if (string.IsNullOrWhiteSpace(seed))
+                    throw new InvalidOperationException("Satora wallet seed is not configured for this store.");
+
+                var status      = await satoraService.GetSwapInfoAsync(swapId, seed);
                 if (dbSwap.Status != status)
                 {
                     dbSwap.Status = status;
                     _context.SatoraTransactions.Update(dbSwap);
                     await _context.SaveChangesAsync();
                 }
-                return status;
+                return MapSwapStatus(status, dbSwap.DateT);
             }
             catch (Exception e)
             {
@@ -569,11 +711,21 @@ namespace BTCPayServer.Plugins.Satora.Services
             var storeSettings = await _context.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == storeId);
             model.LocalTx = await _context.SatoraTransactions
                 .FirstOrDefaultAsync(s => s.TxID == swapId && s.StoreId == storeId);
+            if (model.LocalTx != null)
+                model.StatusView = MapSwapStatus(model.LocalTx.Status, model.LocalTx.DateT);
+
+            var seed = storeSettings?.Seed;
+            if (string.IsNullOrWhiteSpace(seed))
+            {
+                model.BackendError = "Satora wallet seed is not configured for this store.";
+                return model;
+            }
 
             try
             {
-                var swap = await satoraService.GetSwapAsync(swapId, storeSettings.Seed);
+                var swap = await satoraService.GetSwapAsync(swapId, seed);
                 model.BackendStatus  = swap.Status.GetType().Name;
+                model.StatusView = MapSwapStatus(model.BackendStatus, model.LocalTx?.DateT);
                 model.DepositAddress = (swap.Funding as SwapFunding.Gasless)?.@depositAddress;
                 model.DepositAmount  = swap.DepositAmount;
                 model.DepositToken   = swap.DepositToken.GetType().Name;
@@ -589,7 +741,7 @@ namespace BTCPayServer.Plugins.Satora.Services
 
             try
             {
-                model.DerivedArkadeAddress = await satoraService.GetArkadeAddressAsync(storeSettings.Seed);
+                model.DerivedArkadeAddress = await satoraService.GetArkadeAddressAsync(seed);
             }
             catch (Exception e)
             {
@@ -599,6 +751,29 @@ namespace BTCPayServer.Plugins.Satora.Services
             return model;
         }
 
+        public async Task<(string action, SatoraSwapStatusView status)> RetrySwapAsync(string storeId, string swapId)
+        {
+            await using var _context = pluginDbContextFactory.CreateContext();
+            var dbSwap = await _context.SatoraTransactions
+                .FirstOrDefaultAsync(s => s.TxID == swapId && s.StoreId == storeId);
+            if (dbSwap == null)
+                throw new InvalidOperationException("Swap was not found in the local Satora transaction table.");
+
+            var currentStatus = MapSwapStatus(dbSwap.Status, dbSwap.DateT);
+            if (!IsRetryableStatus(currentStatus.RawStatus))
+            {
+                // TODO: Replace this guard with the SDK/contract-manager retry
+                // entry point once it exists. Per Satora guidance, merchant
+                // recovery should retry delivery to the BTC side, not expose an
+                // EVM refund path to the merchant.
+                throw new NotSupportedException(
+                    $"Retry for terminal swap status {currentStatus.RawStatus} is pending SDK contract-manager recovery support.");
+            }
+
+            var (action, rawStatus) = await ContinueSwapAsync(swapId);
+            return (action, MapSwapStatus(rawStatus, dbSwap.DateT));
+        }
+
 
         public async Task<(string action, string status)> ContinueSwapAsync(string swapId, string? destinationOverride = null)
         {
@@ -606,9 +781,17 @@ namespace BTCPayServer.Plugins.Satora.Services
             {
                 await using var _context = pluginDbContextFactory.CreateContext();
                 var dbSwap        = await _context.SatoraTransactions.FirstOrDefaultAsync(s => s.TxID == swapId);
-                var storeSettings = await _context.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == dbSwap.StoreId);
+                if (dbSwap == null)
+                    throw new InvalidOperationException("Swap was not found in the local Satora transaction table.");
 
-                var swap            = await satoraService.GetSwapAsync(swapId, storeSettings.Seed);
+                var storeSettings = await _context.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == dbSwap.StoreId);
+                if (storeSettings == null)
+                    throw new InvalidOperationException("Satora settings were not found for the swap's store.");
+                var seed = storeSettings.Seed;
+                if (string.IsNullOrWhiteSpace(seed))
+                    throw new InvalidOperationException("Satora wallet seed is not configured for this store.");
+
+                var swap            = await satoraService.GetSwapAsync(swapId, seed);
                 var statusName      = swap.Status.GetType().Name;
                 var originalClaimTxId = dbSwap?.ClaimTxId;
                 var originalSweepTxId = dbSwap?.SweepTxId;
@@ -617,16 +800,16 @@ namespace BTCPayServer.Plugins.Satora.Services
                 switch (swap.Status)
                 {
                     case SwapStatus.Pending:
-                        var deposit = await satoraService.CheckDepositAsync(swapId, storeSettings.Seed);
+                        var deposit = await satoraService.CheckDepositAsync(swapId, seed);
                         if (!deposit.HasSufficientSourceToken)
                         {
                             action = $"waiting_for_deposit ({deposit.SourceTokenBalance}/{deposit.SourceTokenRequired})";
                             break;
                         }
-                        var fundReceipt = await satoraService.FundSwapAsync(swapId, storeSettings.Seed);
+                        var fundReceipt = await satoraService.FundSwapAsync(swapId, seed);
                         logger.LogInformation("SatoraPlugin:ContinueSwap({SwapId}): funded, userOpHash={Hash}", swapId, fundReceipt.UserOpHash);
                         action     = $"funded:{fundReceipt.UserOpHash}";
-                        swap       = await satoraService.GetSwapAsync(swapId, storeSettings.Seed);
+                        swap       = await satoraService.GetSwapAsync(swapId, seed);
                         statusName = swap.Status.GetType().Name;
                         break;
 
@@ -637,8 +820,8 @@ namespace BTCPayServer.Plugins.Satora.Services
 
                     case SwapStatus.ServerFunded:
                       /*  var destination = destinationOverride
-                            ?? await satoraService.GetArkadeAddressAsync(storeSettings.Seed);
-                        var claimReceipt = await satoraService.ClaimAsync(swapId, destination, storeSettings.Seed);
+                            ?? await satoraService.GetArkadeAddressAsync(seed);
+                        var claimReceipt = await satoraService.ClaimAsync(swapId, destination, seed);
                         logger.LogInformation("SatoraPlugin:ContinueSwap({SwapId}): claimed {Sats} sats → wallet Satora, ark_txid={Txid}",
                             swapId, claimReceipt.ClaimAmountSats, claimReceipt.ArkTxid);
                         if (dbSwap != null)
@@ -647,7 +830,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                         var sweepTxId = await SweepToMerchantAsync(
                             dbSwap?.BTCPayInvoiceId,
                             claimReceipt.ClaimAmountSats,
-                            storeSettings.Seed,
+                            seed,
                             swapId,
                             dbSwap?.InvoiceArkadeAddress);
 
@@ -670,7 +853,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                             }
                         }
 
-                        swap = await satoraService.GetSwapAsync(swapId, storeSettings.Seed);
+                        swap = await satoraService.GetSwapAsync(swapId, seed);
                         statusName = swap.Status.GetType().Name;
                         break;
 
@@ -686,7 +869,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                              var retrySweepTxId = await SweepToMerchantAsync(
                                  dbSwap.BTCPayInvoiceId,
                                  redeemedSats,
-                                 storeSettings.Seed,
+                                 seed,
                                  swapId,
                                  dbSwap.InvoiceArkadeAddress);
 
