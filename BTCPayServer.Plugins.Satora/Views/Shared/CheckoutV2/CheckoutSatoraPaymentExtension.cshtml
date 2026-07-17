@@ -137,6 +137,21 @@
                         </div>
                     </div>
 
+                    <div class="small text-muted mb-2" v-if="swapResult.networkFeeSats || swapResult.gaslessNetworkFeeSats || swapResult.protocolFeeSats || swapResult.minAmountSats || swapResult.maxAmountSats">
+                        <div v-if="swapResult.networkFeeSats || swapResult.gaslessNetworkFeeSats || swapResult.protocolFeeSats">
+                            Fees:
+                            <span v-if="swapResult.networkFeeSats">network {{ swapResult.networkFeeSats }} sats</span>
+                            <span v-if="swapResult.gaslessNetworkFeeSats">gasless {{ swapResult.gaslessNetworkFeeSats }} sats</span>
+                            <span v-if="swapResult.protocolFeeSats">protocol {{ swapResult.protocolFeeSats }} sats</span>
+                            <span v-if="swapResult.protocolFeeRate">({{ swapResult.protocolFeeRate }}%)</span>
+                        </div>
+                        <div v-if="swapResult.minAmountSats || swapResult.maxAmountSats">
+                            Limits:
+                            <span v-if="swapResult.minAmountSats">min {{ swapResult.minAmountSats }} sats</span>
+                            <span v-if="swapResult.maxAmountSats">max {{ swapResult.maxAmountSats }} sats</span>
+                        </div>
+                    </div>
+
                     <button class="btn btn-primary w-100 mt-2" v-on:click="payInWallet" :disabled="!swapResult">
                         <i class="fa fa-external-link-alt"></i>
                         Pay in wallet

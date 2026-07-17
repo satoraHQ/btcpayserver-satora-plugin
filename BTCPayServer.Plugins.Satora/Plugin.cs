@@ -1,7 +1,11 @@
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Lightning;
 using BTCPayServer.Plugins.Satora.Data;
+using BTCPayServer.Plugins.Satora.Lightning;
+using BTCPayServer.Plugins.Satora.Payments;
 using BTCPayServer.Plugins.Satora.Services;
+using BTCPayServer.Payments;
 
 namespace BTCPayServer.Plugins.Satora;
 
@@ -22,6 +26,10 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddHostedService<SatoraSwapWatcher>()
                 .AddSingleton<SatoraSettlementService>()
                 .AddSingleton<SatoraService>()
-                .AddSingleton<SatoraPluginService>();
+                .AddSingleton<SatoraPluginService>()
+                .AddSingleton<IPaymentMethodHandler, SatoraPaymentMethodHandler>()
+                .AddSingleton<IPayoutHandler, SatoraPayoutHandler>()
+                .AddSingleton<ILightningConnectionStringHandler, SatoraLightningConnectionStringHandler>()
+                .AddDefaultPrettyName(SatoraPaymentMethod.PaymentMethodId, "Satora");
     }
 }

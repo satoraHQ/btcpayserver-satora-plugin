@@ -150,6 +150,13 @@
                 const fromAmount = result.fromAmount ?? result.FromAmount ?? null;
                 const swapId = result.swapId ?? result.SwapId ?? "";
                 const statusMessage = result.statusMessage ?? result.StatusMessage ?? "";
+                const networkFeeSats = result.networkFeeSats ?? result.NetworkFeeSats ?? 0;
+                const gaslessNetworkFeeSats = result.gaslessNetworkFeeSats ?? result.GaslessNetworkFeeSats ?? 0;
+                const protocolFeeSats = result.protocolFeeSats ?? result.ProtocolFeeSats ?? 0;
+                const protocolFeeRate = result.protocolFeeRate ?? result.ProtocolFeeRate ?? 0;
+                const minAmountSats = result.minAmountSats ?? result.MinAmountSats ?? 0;
+                const maxAmountSats = result.maxAmountSats ?? result.MaxAmountSats ?? 0;
+                const bridgeFee = result.bridgeFee ?? result.BridgeFee ?? null;
 
                 if (!success) {
                     throw new Error(statusMessage || "Swap creation failed.");
@@ -160,7 +167,14 @@
                     swapId,
                     statusMessage,
                     fromAddress,
-                    fromAmount
+                    fromAmount,
+                    networkFeeSats,
+                    gaslessNetworkFeeSats,
+                    protocolFeeSats,
+                    protocolFeeRate,
+                    minAmountSats,
+                    maxAmountSats,
+                    bridgeFee
                 };
                 this.lastSwapKey = swapKey;
             } catch (err) {

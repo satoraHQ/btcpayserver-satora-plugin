@@ -35,86 +35,93 @@
 <br />
 
 <div permission="@Policies.CanModifyStoreSettings">
-    <h4>Configuration</h4>
-    <form method="post">
-        @Html.AntiForgeryToken()
-        <input asp-for="Settings.StoreId" type="hidden" />
-        <div class="form-group">
-            <table>
-                <tr>
-                    <td width="100%">
-                        <div class="d-flex align-items-center">
-                            <input asp-for="@Model.Settings.Enabled" type="checkbox" class="btcpay-toggle me-3" />
-                            <label asp-for="@Model.Settings.Enabled" class="form-check-label"></label>
-                        </div>
-                    </td>
-                    <td align="right">
-                        <button name="command" type="submit" value="save" class="btn btn-primary">Save</button>
-                    </td>
-                </tr>
-            </table>
-        </div>
-    </form>
-
-    @if (Model.Settings.Seed != null)
+    @{
+        var hasWallet = !string.IsNullOrEmpty(Model.Settings.CryptedSeed);
+        var walletReady = hasWallet && Model.Settings.BackupConfirmed;
+    }
+    <h4>Wallet setup</h4>
+    @if (!Model.CanManageSeed)
     {
-        <div class="form-group mt-3">
-            <h4>Seed Phrase</h4>
-            <div class="alert alert-warning alert-dismissible fade show d-flex align-items-start gap-2" role="alert" id="seedWarningAlert">
-                <span>⚠</span>
-                <span class="flex-grow-1">
-                    <strong>Warning:</strong> Never share your seed phrase with anyone.
-                    Anyone who obtains it can take full control of your wallet.
-                    Store it securely offline.
-                </span>
-                <button type="button" class="btn btn-link text-decoration-none p-0 border-0" data-bs-dismiss="alert" aria-label="Close">
-                    <span aria-hidden="true" style="font-weight: bold; font-size: 1.2rem; color: #000;">✕</span>
-                </button>
+        <div class="alert alert-warning">
+            Only the store owner can create, import, view, or enable the Satora wallet seed.
+        </div>
+    }
+    else
+    {
+        <div class="d-flex flex-wrap gap-3 mb-4">
+            <div>
+                <div class="text-secondary small">Wallet</div>
+                <strong>@(hasWallet ? "Seed stored" : "Not set up")</strong>
             </div>
-            <div class="input-group">
-                <input type="password"
-                       id="seedPhraseInput"
-                       class="form-control font-monospace"
-                       value="@Model.Settings.Seed"
-                       readonly
-                       autocomplete="off"
-                       data-sensitive />
-                <button class="btn btn-outline-secondary"
-                        type="button"
-                        id="toggleSeedBtn"
-                        onclick="toggleSeedPhrase()"
-                        title="Show / Hide seed phrase">
-                    Show
-                </button>
-                <button class="btn btn-outline-secondary"
-                        type="button"
-                        onclick="copySeedPhrase()"
-                        title="Copy seed phrase to clipboard">
-                    Copy
-                </button>
+            <div>
+                <div class="text-secondary small">Backup</div>
+                <strong>@(Model.Settings.BackupConfirmed ? "Confirmed" : "Required")</strong>
             </div>
-            <div id="seedCopiedMsg" class="text-success small mt-1" style="display:none;">
-                Copied to clipboard!
+            <div>
+                <div class="text-secondary small">Checkout / Lightning</div>
+                <strong>@(Model.Settings.Enabled && walletReady ? "Enabled" : "Disabled")</strong>
             </div>
         </div>
-        <script>
-            function toggleSeedPhrase() {
-                const input = document.getElementById('seedPhraseInput');
-                const btn   = document.getElementById('toggleSeedBtn');
-                const isHidden = input.type === 'password';
-                input.type   = isHidden ? 'text' : 'password';
-                btn.textContent = isHidden ? 'Hide' : 'Show';
-            }
 
-            function copySeedPhrase() {
-                const input = document.getElementById('seedPhraseInput');
-                navigator.clipboard.writeText(input.value).then(() => {
-                    const msg = document.getElementById('seedCopiedMsg');
-                    msg.style.display = 'block';
-                    setTimeout(() => msg.style.display = 'none', 2500);
-                });
-            }
-        </script>
+        @if (!hasWallet)
+        {
+            <form method="post" asp-action="GenerateWallet" asp-route-storeId="@Model.Settings.StoreId" class="mb-4">
+                @Html.AntiForgeryToken()
+                <button type="submit" class="btn btn-primary">Generate new seed</button>
+            </form>
+
+            <h5>Restore existing wallet</h5>
+            <form method="post" asp-action="RestoreWallet" asp-route-storeId="@Model.Settings.StoreId" class="mb-4">
+                @Html.AntiForgeryToken()
+                <div class="form-group">
+                    <label for="restoreSeed" class="form-label">Seed phrase</label>
+                    <textarea id="restoreSeed" name="Seed" class="form-control font-monospace" rows="3" autocomplete="off" spellcheck="false"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="restoreSeedConfirmation" class="form-label">Re-enter seed phrase</label>
+                    <textarea id="restoreSeedConfirmation" name="SeedConfirmation" class="form-control font-monospace" rows="3" autocomplete="off" spellcheck="false"></textarea>
+                </div>
+                <button type="submit" class="btn btn-secondary">Restore and enable</button>
+            </form>
+        }
+
+        @if (!string.IsNullOrEmpty(Model.OneTimeSeed))
+        {
+            <div class="alert alert-danger">
+                This seed is shown once. Store it offline before leaving this page.
+            </div>
+            <textarea id="generatedSeed" class="form-control font-monospace mb-3" rows="3" readonly data-sensitive>@Model.OneTimeSeed</textarea>
+        }
+
+        @if (hasWallet && !Model.Settings.BackupConfirmed)
+        {
+            <h5>Confirm backup</h5>
+            <form method="post" asp-action="ConfirmBackup" asp-route-storeId="@Model.Settings.StoreId" class="mb-4">
+                @Html.AntiForgeryToken()
+                <div class="form-group">
+                    <label for="confirmSeed" class="form-label">Re-enter seed phrase</label>
+                    <textarea id="confirmSeed" name="SeedConfirmation" class="form-control font-monospace" rows="3" autocomplete="off" spellcheck="false"></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Confirm backup and enable</button>
+            </form>
+        }
+
+        @if (walletReady)
+        {
+            <h5>Configuration</h5>
+            <form method="post">
+                @Html.AntiForgeryToken()
+                <input name="StoreId" value="@Model.Settings.StoreId" type="hidden" />
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                    <div class="d-flex align-items-center">
+                        <input name="Enabled" value="true" checked="@Model.Settings.Enabled" type="checkbox" class="btcpay-toggle me-3" />
+                        <input name="Enabled" value="false" type="hidden" />
+                        <label asp-for="@Model.Settings.Enabled" class="form-check-label"></label>
+                    </div>
+                    <button name="command" type="submit" value="save" class="btn btn-primary">Save</button>
+                </div>
+            </form>
+        }
     }
 </div>
 <br />
@@ -124,60 +131,222 @@
 
     @if (Model.WalletBalance != null)
     {
-        var confirmedBtc    = Model.WalletBalance.confirmedSats    / 100_000_000m;
-        var preConfirmedBtc = Model.WalletBalance.preConfirmedSats / 100_000_000m;
-        var recoverableBtc  = Model.WalletBalance.recoverableSats  / 100_000_000m;
+        var balance = Model.WalletBalance;
+        var refreshedAt = balance.RefreshedAt.ToLocalTime();
+        string fiatValue(decimal? value) => value is decimal amount
+            ? $"{amount:0.00} {balance.FiatCurrency}"
+            : "Unavailable";
 
-        <div class="widget store-wallet-balance">
+        <div id="SatoraWalletBalance" class="widget store-wallet-balance" data-refresh-url="@Url.Action("WalletBalance", "SatoraPlugin", new { storeId = Model.Settings.StoreId })">
             <div class="d-flex gap-3 align-items-center justify-content-between mb-2">
-                <h6>Arkade Wallet Balance</h6>
+                <div>
+                    <h6 class="mb-0">Arkade Wallet Balance</h6>
+                    <small class="text-secondary">
+                        Refreshed <span data-balance-refreshed-at>@refreshedAt.ToString("g")</span>
+                    </small>
+                </div>
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-balance-refresh title="Refresh wallet balance">
+                    <vc:icon symbol="actions-refresh" class="icon-refresh" />
+                    Refresh
+                </button>
             </div>
             <div class="balances d-flex flex-wrap gap-4">
                 <div class="balance">
-                    <div class="d-flex align-items-baseline gap-1">
-                        <h3 class="d-inline-block me-1" data-balance="@confirmedBtc" data-sensitive>@confirmedBtc.ToString("0.########")</h3>
-                        <span class="text-secondary fw-semibold text-nowrap"><span class="currency">BTC</span> confirmed</span>
+                    <div class="d-flex align-items-baseline gap-1 mb-1">
+                        <h3 class="d-inline-block me-1" data-balance-btc="confirmed" data-sensitive>@balance.ConfirmedBtc.ToString("0.########")</h3>
+                        <span class="text-secondary fw-semibold text-nowrap">BTC confirmed</span>
                     </div>
+                    <div class="text-secondary" data-balance-fiat="confirmed" data-sensitive>@fiatValue(balance.ConfirmedFiat)</div>
                 </div>
 
                 <div class="balance">
-                    <div class="d-flex align-items-baseline gap-1">
-                        <h3 class="d-inline-block me-1" data-balance="@preConfirmedBtc" data-sensitive>@preConfirmedBtc.ToString("0.########")</h3>
-                        <span class="text-secondary text-nowrap"><span class="currency">BTC</span> pre-confirmed</span>
+                    <div class="d-flex align-items-baseline gap-1 mb-1">
+                        <h3 class="d-inline-block me-1" data-balance-btc="preConfirmed" data-sensitive>@balance.PreConfirmedBtc.ToString("0.########")</h3>
+                        <span class="text-secondary text-nowrap">BTC pre-confirmed</span>
                     </div>
+                    <div class="text-secondary" data-balance-fiat="preConfirmed" data-sensitive>@fiatValue(balance.PreConfirmedFiat)</div>
                 </div>
 
                 <div class="balance">
-                    <div class="d-flex align-items-baseline gap-1">
-                        <h3 class="d-inline-block me-1" data-balance="@recoverableBtc" data-sensitive>@recoverableBtc.ToString("0.########")</h3>
-                        <span class="text-secondary text-nowrap"><span class="currency">BTC</span> recoverable</span>
+                    <div class="d-flex align-items-baseline gap-1 mb-1">
+                        <h3 class="d-inline-block me-1" data-balance-btc="recoverable" data-sensitive>@balance.RecoverableBtc.ToString("0.########")</h3>
+                        <span class="text-secondary text-nowrap">BTC recoverable</span>
                     </div>
+                    <div class="text-secondary" data-balance-fiat="recoverable" data-sensitive>@fiatValue(balance.RecoverableFiat)</div>
                 </div>
             </div>
+            <div class="text-warning small mt-3 @(string.IsNullOrEmpty(balance.FiatError) ? "d-none" : "")" data-balance-fiat-error>
+                @balance.FiatError
+            </div>
         </div>
+        <script>
+            (function () {
+                const widget = document.getElementById('SatoraWalletBalance');
+                if (!widget) return;
+
+                const refreshButton = widget.querySelector('[data-balance-refresh]');
+                const refreshedAt = widget.querySelector('[data-balance-refreshed-at]');
+                const fiatError = widget.querySelector('[data-balance-fiat-error]');
+                const btcFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 });
+                const fiatFormatter = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+                function formatFiat(value, currency) {
+                    return value === null || value === undefined ? 'Unavailable' : `${fiatFormatter.format(Number(value))} ${currency}`;
+                }
+
+                function render(balance) {
+                    widget.querySelector('[data-balance-btc="confirmed"]').textContent = btcFormatter.format(Number(balance.confirmedBtc));
+                    widget.querySelector('[data-balance-btc="preConfirmed"]').textContent = btcFormatter.format(Number(balance.preConfirmedBtc));
+                    widget.querySelector('[data-balance-btc="recoverable"]').textContent = btcFormatter.format(Number(balance.recoverableBtc));
+                    widget.querySelector('[data-balance-fiat="confirmed"]').textContent = formatFiat(balance.confirmedFiat, balance.fiatCurrency);
+                    widget.querySelector('[data-balance-fiat="preConfirmed"]').textContent = formatFiat(balance.preConfirmedFiat, balance.fiatCurrency);
+                    widget.querySelector('[data-balance-fiat="recoverable"]').textContent = formatFiat(balance.recoverableFiat, balance.fiatCurrency);
+                    refreshedAt.textContent = new Date(balance.refreshedAt).toLocaleString();
+
+                    if (balance.fiatError) {
+                        fiatError.textContent = balance.fiatError;
+                        fiatError.classList.remove('d-none');
+                    } else {
+                        fiatError.textContent = '';
+                        fiatError.classList.add('d-none');
+                    }
+                }
+
+                refreshButton.addEventListener('click', async () => {
+                    refreshButton.disabled = true;
+                    try {
+                        const response = await fetch(widget.dataset.refreshUrl, { headers: { Accept: 'application/json' } });
+                        if (!response.ok) throw new Error(`Balance refresh failed (${response.status})`);
+                        render(await response.json());
+                    } catch (error) {
+                        fiatError.textContent = error.message;
+                        fiatError.classList.remove('d-none');
+                    } finally {
+                        refreshButton.disabled = false;
+                    }
+                });
+            })();
+        </script>
         <div style="height:20px"></div><br/>
     }
 
 
+    <div permission="@Policies.CanManagePayouts" class="mb-4">
+        <h4>Withdraw</h4>
+        <form method="post" asp-action="ReviewWithdraw" asp-route-storeId="@Model.Settings.StoreId" class="mb-3">
+            @Html.AntiForgeryToken()
+            <input name="StoreId" value="@Model.Settings.StoreId" type="hidden" />
+            <div class="form-group">
+                <label for="withdrawDestination" class="form-label">Destination</label>
+                <input id="withdrawDestination" name="Destination" class="form-control" value="@Model.WithdrawRequest.Destination" autocomplete="off" spellcheck="false" />
+                <div class="form-text">Arkade address, BOLT11 invoice, LNURL, Lightning address, Bitcoin address, or BIP21 URI.</div>
+            </div>
+            <div class="form-group">
+                <label for="withdrawAmount" class="form-label">Amount (BTC)</label>
+                <input id="withdrawAmount" name="AmountBtc" class="form-control w-auto" value="@(Model.WithdrawRequest.AmountBtc?.ToString("0.########"))" inputmode="decimal" />
+                <div class="form-text">Required for Arkade, LNURL, Lightning address, and amountless invoices. Fixed BOLT11 invoices and BIP21 URIs can provide the amount.</div>
+            </div>
+            <button type="submit" class="btn btn-primary">Review withdrawal</button>
+        </form>
 
-    <h4>Satora Customers Transactions</h4>
+        @if (Model.WithdrawReview != null)
+        {
+            var review = Model.WithdrawReview;
+            <div class="border rounded p-3 mb-3">
+                <div class="d-flex flex-wrap gap-4">
+                    <div>
+                        <div class="text-secondary small">Destination type</div>
+                        <strong>@review.DestinationTypeDisplay</strong>
+                    </div>
+                    <div>
+                        <div class="text-secondary small">Amount</div>
+                        <strong>@review.AmountBtc.ToString("0.########") BTC</strong>
+                        <div class="text-secondary small">@review.AmountSats sats</div>
+                    </div>
+                    <div>
+                        <div class="text-secondary small">Confirmed balance</div>
+                        <strong>@((review.AvailableSats / 100_000_000m).ToString("0.########")) BTC</strong>
+                        <div class="text-secondary small">@review.AvailableSats sats</div>
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <div class="text-secondary small">Destination</div>
+                    <code class="text-break">@review.NormalizedDestination</code>
+                </div>
+                <div class="mt-3">
+                    <div class="text-secondary small">Fees</div>
+                    <span>@review.FeeDescription</span>
+                </div>
+                @if (!string.IsNullOrEmpty(review.Error))
+                {
+                    <div class="alert alert-warning mt-3 mb-0">@review.Error</div>
+                }
+                @if (review.CanExecute)
+                {
+                    <form method="post" asp-action="ExecuteWithdraw" asp-route-storeId="@Model.Settings.StoreId" class="mt-3">
+                        @Html.AntiForgeryToken()
+                        <input name="StoreId" value="@Model.Settings.StoreId" type="hidden" />
+                        <input name="Destination" value="@review.Request.Destination" type="hidden" />
+                        <input name="AmountBtc" value="@review.AmountBtc.ToString(System.Globalization.CultureInfo.InvariantCulture)" type="hidden" />
+                        <button type="submit" class="btn btn-danger">Confirm and withdraw</button>
+                    </form>
+                }
+            </div>
+        }
 
-    @if (!Model.Transactions.Any())
+        @if (Model.WithdrawResult != null)
+        {
+            var result = Model.WithdrawResult;
+            <div class="alert alert-success">
+                <div><strong>@result.DestinationTypeDisplay withdrawal submitted.</strong></div>
+                <div>@result.AmountBtc.ToString("0.########") BTC (@result.AmountSats sats)</div>
+                @if (!string.IsNullOrEmpty(result.TransactionId))
+                {
+                    <div>Arkade tx: <code class="text-break">@result.TransactionId</code></div>
+                }
+                @if (!string.IsNullOrEmpty(result.SwapId))
+                {
+                    <div>Swap: <code class="text-break">@result.SwapId</code></div>
+                }
+                <div>Status: @result.Status</div>
+                @if (!string.IsNullOrEmpty(result.FeeDescription))
+                {
+                    <div>@result.FeeDescription</div>
+                }
+            </div>
+        }
+    </div>
+
+
+    <h4>Satora swaps</h4>
+
+    @if (!Model.Swaps.Any())
     {
         <p>
-            <i>No Satora transactions for this store...</i>
+            <i>No Satora swaps for this store...</i>
         </p>
     }
     else
     {
-        var page = Context.Request.Query["page"].Count > 0 ? int.Parse(Context.Request.Query["page"]) : 1;
+        var page = int.TryParse(Context.Request.Query["page"].FirstOrDefault(), out var parsedPage) && parsedPage > 0 ? parsedPage : 1;
         var pageSize = 20;
-        var totalItems = Model.Transactions.Count();
+        var totalItems = Model.Swaps.Count();
         var totalPages = (int)Math.Ceiling(totalItems / (double)pageSize);
-        var pagedTransactions = Model.Transactions
+        var pagedSwaps = Model.Swaps
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToList();
+
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+            <div class="d-flex flex-wrap gap-2">
+                <span class="badge badge-secondary">Total @Model.SwapSummary.Total</span>
+                <span class="badge badge-info">Active @Model.SwapSummary.Active</span>
+                <span class="badge badge-warning">Needs action @Model.SwapSummary.NeedsAction</span>
+                <span class="badge badge-warning">Stale @Model.SwapSummary.Stale</span>
+                <span class="badge badge-success">Completed @Model.SwapSummary.Completed</span>
+            </div>
+            <a asp-action="ExportSwaps" asp-route-storeId="@Model.Settings.StoreId" class="btn btn-sm btn-secondary">Export CSV</a>
+        </div>
 
         <div class="table-responsive">
             <table class="table table-hover mass-action">
@@ -190,18 +359,23 @@
                         <th class="text-nowrap">Blockchain</th>
                         <th class="text-nowrap">Amount (BTC)</th>
                         <th class="text-nowrap">Invoice</th>
+                        <th class="text-nowrap">Recovery</th>
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (var item in pagedTransactions)
+                    @foreach (var swap in pagedSwaps)
                     {
+                        var item = swap.LocalTx;
+                        var status = swap.Status;
                         <tr class="mass-action-row item">
                             <td class="text-break align-middle invoiceId-col">
                                 <a asp-action="SwapDetails" asp-route-storeId="@Model.Settings.StoreId" asp-route-swapId="@item.TxID" class="badge badge-settled" title="Open swap details">@item.TxID</a>
                             </td>
-                            <td align="center">
-                                <div class="badge badge-expired" id="status-@item.TxID">@item.Status</div><br />
-                                <a href="#" onclick="GetSwapStatus('@item.TxID');return false;" title="Refresh status">
+                            <td class="align-middle">
+                                <div class="badge badge-@status.Severity" id="status-badge-@item.TxID">@status.DisplayStatus</div>
+                                <div class="small text-muted" id="status-raw-@item.TxID">@status.RawStatus</div>
+                                <div class="small @(status.NeedsManualAction ? "text-warning" : "text-muted")" id="status-hint-@item.TxID">@status.ActionHint</div>
+                                <a href="#" onclick="GetSwapStatus('@item.TxID');return false;" title="Refresh status" data-swap-live="@(!status.IsTerminal).ToString().ToLowerInvariant()" data-swap-id="@item.TxID">
                                     <vc:icon symbol="actions-refresh" class="icon-refresh" />
                                 </a>
                             </td>
@@ -220,6 +394,26 @@
                             <td class="text-break align-middle invoiceId-col">
                                 <a asp-controller="UIInvoice" asp-action="Invoice" asp-route-invoiceId="@item.BTCPayInvoiceId" class="text-break">@item.BTCPayInvoiceId</a>
                             </td>
+                            <td class="align-middle text-nowrap">
+                                @if (status.NeedsManualAction)
+                                {
+                                    <div class="badge badge-warning mb-2">Needs action</div>
+                                }
+                                @if (status.CanRetry)
+                                {
+                                    <form method="post" asp-action="RetrySwap" asp-route-storeId="@Model.Settings.StoreId" asp-route-swapId="@item.TxID" class="d-inline">
+                                        <button type="submit" class="btn btn-sm btn-secondary" title="@status.RetryUnavailableReason">Retry</button>
+                                    </form>
+                                }
+                                @if (!string.IsNullOrEmpty(status.RetryUnavailableReason))
+                                {
+                                    <div class="small text-muted">@status.RetryUnavailableReason</div>
+                                }
+                                @if (!status.CanRetry && !status.NeedsManualAction)
+                                {
+                                    <span class="text-muted">No action</span>
+                                }
+                            </td>
                         </tr>
                     }
                 </tbody>
@@ -227,25 +421,44 @@
         </div>
         <script>
             function GetSwapStatus(swapId) {
-                $('#status-' + swapId).hide();
+                $('#status-badge-' + swapId).hide();
                 $.ajax({
                     url: 'Satora/GetSwapStatus',
                     type: 'GET',
                     data: { swapId: swapId },
                     success: function (data) {
                         if (data) {
-                            $('#status-' + swapId).text(data);
+                            var displayStatus = data.displayStatus || data.DisplayStatus;
+                            var rawStatus = data.rawStatus || data.RawStatus;
+                            var severity = data.severity || data.Severity || 'secondary';
+                            var actionHint = data.actionHint || data.ActionHint || '';
+                            var needsManualAction = data.needsManualAction ?? data.NeedsManualAction;
+
+                            $('#status-badge-' + swapId)
+                                .removeClass()
+                                .addClass('badge badge-' + severity)
+                                .text(displayStatus);
+                            $('#status-raw-' + swapId).text(rawStatus);
+                            $('#status-hint-' + swapId)
+                                .removeClass('small text-warning text-muted')
+                                .addClass('small ' + (needsManualAction ? 'text-warning' : 'text-muted'))
+                                .text(actionHint);
                         } else {
                             console.log('No status returned for swap ID:', swapId);
                         }
-                        $('#status-' + swapId).show();
+                        $('#status-badge-' + swapId).show();
                     },
                     error: function (dataError) {
                         console.log('Error fetching swap status:', dataError);
-                        $('#status-' + swapId).show();
+                        $('#status-badge-' + swapId).show();
                     }
                 });
             }
+
+            $('[data-swap-live="true"]').each(function () {
+                var swapId = $(this).data('swap-id');
+                window.setInterval(function () { GetSwapStatus(swapId); }, 30000);
+            });
 
         </script>
         <nav aria-label="Page navigation" class="mt-3">
@@ -268,4 +481,3 @@
     }
 </div>
 <br />
-

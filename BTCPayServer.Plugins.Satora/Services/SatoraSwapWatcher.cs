@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using BTCPayServer.Plugins.Satora.Data;
+using BTCPayServer.Plugins.Satora.Models;
 
 namespace BTCPayServer.Plugins.Satora.Services;
 
@@ -9,14 +10,6 @@ public class SatoraSwapWatcher(
         ILogger<SatoraSwapWatcher> logger) : BackgroundService
 {
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(60);
-
-    private static readonly string[] TerminalStatuses = 
-    {
-        "ClientRedeemed", "ServerRedeemed", "ClientRefunded",
-        "ClientFundedServerRefunded", "ClientRefundedServerFunded",
-        "ClientRefundedServerRefunded", "Expired", "ClientInvalidFunded",
-        "ClientFundedTooLate", "ServerWontFund"
-    };
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -40,7 +33,7 @@ public class SatoraSwapWatcher(
         using var context = dbContextFactory.CreateContext();
         
         var activeSwaps = await context.SatoraTransactions
-            .Where(tx => tx.Status == null || !TerminalStatuses.Contains(tx.Status))
+            .Where(tx => tx.Status == null || !SatoraSwapStatuses.Terminal.Contains(tx.Status))
             .ToListAsync(cancellationToken);
 
         foreach (var tx in activeSwaps)
