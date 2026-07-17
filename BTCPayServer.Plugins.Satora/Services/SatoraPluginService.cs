@@ -17,6 +17,7 @@ using BTCPayServer.Rating;
 using BTCPayServer.Services.Rates;
 using BTCPayServer.Services.Invoices;
 using uniffi.satora_sdk_ffi;
+using System.Text;
 using SatoraBitcoinNetwork = uniffi.satora_sdk_ffi.BitcoinNetwork;
 
 namespace BTCPayServer.Plugins.Satora.Services
@@ -32,14 +33,6 @@ namespace BTCPayServer.Plugins.Satora.Services
         BTCPayNetworkProvider networkProvider,
         InvoiceRepository invoiceRepository)
     {
-        private static readonly string[] TerminalSwapStatuses =
-        {
-            "ClientRedeemed", "ServerRedeemed", "ClientRefunded",
-            "ClientFundedServerRefunded", "ClientRefundedServerFunded",
-            "ClientRefundedServerRefunded", "Expired", "ClientInvalidFunded",
-            "ClientFundedTooLate", "ServerWontFund", "ClientRedeemedAndClientRefunded"
-        };
-
         public async Task<SatoraSettings> GetStoreSettings(string storeId)
         {
             try
@@ -86,12 +79,14 @@ namespace BTCPayServer.Plugins.Satora.Services
                     .ToListAsync();
 
                 var walletBalance = await GetWalletBalance(settings);
+                var swaps = txs.Select(CreateSwapListItem).ToList();
 
                 return new SatoraModel
                 {
                     Settings = settings,
                     Transactions = txs,
-                    Swaps = txs.Select(CreateSwapListItem).ToList(),
+                    Swaps = swaps,
+                    SwapSummary = CreateSwapSummary(swaps),
                     WalletBalance = walletBalance
                 };
             }
@@ -532,6 +527,19 @@ namespace BTCPayServer.Plugins.Satora.Services
             };
         }
 
+        private static SatoraSwapSummary CreateSwapSummary(IEnumerable<SatoraSwapListItem> swaps)
+        {
+            var statuses = swaps.Select(s => s.Status).ToList();
+            return new SatoraSwapSummary
+            {
+                Total = statuses.Count,
+                Active = statuses.Count(s => !s.IsTerminal),
+                NeedsAction = statuses.Count(s => s.NeedsManualAction),
+                Stale = statuses.Count(s => s.IsStale),
+                Completed = statuses.Count(s => s.RawStatus is "ClientRedeemed" or "ServerRedeemed")
+            };
+        }
+
         private static SatoraSwapStatusView MapSwapStatus(string? rawStatus, DateTime? createdAt)
         {
             var status = string.IsNullOrWhiteSpace(rawStatus) ? "Pending" : rawStatus;
@@ -612,6 +620,7 @@ namespace BTCPayServer.Plugins.Satora.Services
             };
 
             view.NeedsManualAction = view.NeedsManualAction || stale;
+            view.IsStale = stale;
             view.CanRetry = view.CanRetry || (!view.IsTerminal && IsRetryableStatus(status));
 
             return view;
@@ -702,7 +711,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                     tx.BTCPayInvoiceId == invoice.Id &&
                     tx.Stablecoin == req.CryptoFrom.ToString() &&
                     tx.Blockchain == req.NetworkFrom.ToString() &&
-                    (tx.Status == null || !TerminalSwapStatuses.Contains(tx.Status)))
+                    (tx.Status == null || !SatoraSwapStatuses.Terminal.Contains(tx.Status)))
                 .OrderByDescending(tx => tx.DateT)
                 .FirstOrDefaultAsync(cancellationToken);
 
@@ -717,7 +726,15 @@ namespace BTCPayServer.Plugins.Satora.Services
             req.BtcNetwork = "ARKADE";
             req.BtcDestination = await satoraService.GetArkadeAddressAsync(seed);
 
-            var response = await satoraService.CreateSwapAsync(req, seed);
+            var quote = await satoraService.GetQuoteAsync(req, seed, cancellationToken);
+            var dueSats = (ulong)Math.Round(due * 100000000m, MidpointRounding.AwayFromZero);
+            if (dueSats < quote.MinAmount || dueSats > quote.MaxAmount)
+            {
+                throw new InvalidOperationException(
+                    $"Satora quote amount is outside allowed limits. Due: {dueSats} sats; min: {quote.MinAmount} sats; max: {quote.MaxAmount} sats.");
+            }
+
+            var response = await satoraService.CreateSwapAsync(req, seed, quote);
             await _context.SatoraTransactions.AddAsync(new SatoraTx
             {
                 StoreId = storeId,
@@ -733,6 +750,49 @@ namespace BTCPayServer.Plugins.Satora.Services
             await _context.SaveChangesAsync(cancellationToken);
 
             return response;
+        }
+
+        public async Task<string> ExportSwapsCsvAsync(string storeId, CancellationToken cancellationToken = default)
+        {
+            await using var _context = pluginDbContextFactory.CreateContext();
+            var rows = await _context.SatoraTransactions
+                .Where(tx => tx.StoreId == storeId)
+                .OrderByDescending(tx => tx.DateT)
+                .ToListAsync(cancellationToken);
+
+            var csv = new StringBuilder();
+            csv.AppendLine("created,invoice_id,swap_id,status,human_status,needs_action,stale,stablecoin,blockchain,btc_amount,claim_tx_id,sweep_tx_id,invoice_arkade_address");
+            foreach (var tx in rows)
+            {
+                var status = MapSwapStatus(tx.Status, tx.DateT);
+                AppendCsv(csv,
+                    tx.DateT.ToString("O"),
+                    tx.BTCPayInvoiceId,
+                    tx.TxID,
+                    status.RawStatus,
+                    status.DisplayStatus,
+                    status.NeedsManualAction.ToString(),
+                    status.IsStale.ToString(),
+                    tx.Stablecoin,
+                    tx.Blockchain,
+                    tx.BTCAmount.ToString("0.########"),
+                    tx.ClaimTxId ?? "",
+                    tx.SweepTxId ?? "",
+                    tx.InvoiceArkadeAddress ?? "");
+            }
+            return csv.ToString();
+        }
+
+        private static void AppendCsv(StringBuilder csv, params string[] values)
+        {
+            csv.AppendLine(string.Join(",", values.Select(EscapeCsv)));
+        }
+
+        private static string EscapeCsv(string value)
+        {
+            if (value.Contains('"') || value.Contains(',') || value.Contains('\n') || value.Contains('\r'))
+                return $"\"{value.Replace("\"", "\"\"")}\"";
+            return value;
         }
 
         public async Task<string?> GetSeedPhraseBySwapId(string swapId)

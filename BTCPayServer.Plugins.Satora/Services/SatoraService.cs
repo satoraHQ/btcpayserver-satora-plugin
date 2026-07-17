@@ -11,41 +11,14 @@ namespace BTCPayServer.Plugins.Satora.Services
 {
     public class SatoraService(ILogger<SatoraService> logger)
     {
-        public async Task<SwapResponse> CreateSwapAsync(SwapRequest req, string seedPhrase)
+        public async Task<SwapResponse> CreateSwapAsync(SwapRequest req, string seedPhrase, Quote? quote = null)
         {
             try
             {
-                ChainId chainFrom = req.NetworkFrom switch
-                {
-                    Blockchains.Arbitrum => new ChainId.Arbitrum(),
-                    Blockchains.Ethereum => new ChainId.Ethereum(),
-                    Blockchains.Polygon => new ChainId.Polygon(),
-                    _ => new ChainId.Other(req.NetworkFrom.ToString())
-                };
-
-                TokenId tokenFrom = (req.CryptoFrom, req.NetworkFrom) switch
-                {
-                    (Stablecoins.USDC, Blockchains.Polygon)   => new TokenId.UsdcPolygon(),
-                    (Stablecoins.USDC, Blockchains.Arbitrum)  => new TokenId.UsdcArbitrum(),
-                    (Stablecoins.USDC, Blockchains.Ethereum)  => new TokenId.UsdcEthereum(),
-                    (Stablecoins.USDT, Blockchains.Polygon)   => new TokenId.UsdtPolygon(),
-                    (Stablecoins.USDT, Blockchains.Ethereum)  => new TokenId.UsdtEthereum(),
-                    (Stablecoins.USDT0, Blockchains.Arbitrum) => new TokenId.Usdt0Arbitrum(),
-                    (Stablecoins.WBTC, Blockchains.Polygon)   => new TokenId.WbtcPolygon(),
-                    (Stablecoins.WBTC, Blockchains.Arbitrum)  => new TokenId.WbtcArbitrum(),
-                    (Stablecoins.WBTC, Blockchains.Ethereum)  => new TokenId.WbtcEthereum(),
-                    _ => new TokenId.Other($"{req.CryptoFrom}-{req.NetworkFrom}")
-                };
-
+                ChainId chainFrom = ToChainId(req.NetworkFrom);
+                TokenId tokenFrom = ToTokenId(req.CryptoFrom, req.NetworkFrom);
                 QuoteAmount quoteAmount = new QuoteAmount.Target((ulong)(req.BtcAmount * 100000000m));
-
-                ChainId chainTo = req.BtcNetwork switch
-                {
-                    "BTC"       => new ChainId.Bitcoin(),
-                    "LIGHTNING" => new ChainId.Lightning(),
-                    "ARKADE"    => new ChainId.Arkade(),
-                    _           => new ChainId.Other(req.BtcNetwork)
-                };
+                ChainId chainTo = ToTargetChainId(req.BtcNetwork);
 
                 Address addressTo = req.BtcNetwork switch
                 {
@@ -56,9 +29,10 @@ namespace BTCPayServer.Plugins.Satora.Services
                 };
 
                 using var client = new global::Satora.Sdk.Client(seedPhrase);
+                quote ??= await client.GetQuoteAsync(chainFrom, tokenFrom, chainTo, new TokenId.Btc(), quoteAmount);
                 var apiSwap = await client.CreateSwapAsync(chainFrom, tokenFrom, chainTo, new TokenId.Btc(), quoteAmount, addressTo, true);
 
-                var swap = ToSwapResponse(apiSwap, req.CryptoFrom, "Swap created successfully");
+                var swap = ToSwapResponse(apiSwap, req.CryptoFrom, "Swap created successfully", quote);
                 logger.LogInformation("Satora Swap Created : {SwapId} {FromAmount} {From} -> {To}",
                     swap.SwapId, swap.FromAmount, $"{req.CryptoFrom}-{req.NetworkFrom}", req.BtcNetwork);
                 return swap;
@@ -66,6 +40,27 @@ namespace BTCPayServer.Plugins.Satora.Services
             catch (Exception ex)
             {
                 logger.LogError("SatoraPlugin.CreateSwap(): {Message} - {From} -> {To}",
+                    ex.Message, $"{req.CryptoFrom}-{req.NetworkFrom}", req.BtcNetwork);
+                throw;
+            }
+        }
+
+        public async Task<Quote> GetQuoteAsync(SwapRequest req, string seedPhrase, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                using var client = new global::Satora.Sdk.Client(seedPhrase);
+                return await client.GetQuoteAsync(
+                    ToChainId(req.NetworkFrom),
+                    ToTokenId(req.CryptoFrom, req.NetworkFrom),
+                    ToTargetChainId(req.BtcNetwork),
+                    new TokenId.Btc(),
+                    new QuoteAmount.Target((ulong)(req.BtcAmount * 100000000m)),
+                    cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError("SatoraPlugin.GetQuoteAsync(): {Message} - {From} -> {To}",
                     ex.Message, $"{req.CryptoFrom}-{req.NetworkFrom}", req.BtcNetwork);
                 throw;
             }
@@ -86,7 +81,7 @@ namespace BTCPayServer.Plugins.Satora.Services
             }
         }
 
-        private static SwapResponse ToSwapResponse(global::Satora.Sdk.SwapDetails apiSwap, Stablecoins cryptoFrom, string statusMessage)
+        private static SwapResponse ToSwapResponse(global::Satora.Sdk.SwapDetails apiSwap, Stablecoins cryptoFrom, string statusMessage, Quote? quote = null)
         {
             string? sDepositAddress = apiSwap.Funding switch
             {
@@ -113,7 +108,53 @@ namespace BTCPayServer.Plugins.Satora.Services
                 FromAddress   = sDepositAddress,
                 FromAmount    = (float)(rawAmount / Math.Pow(10, decimals)),
                 Success       = true,
-                StatusMessage = statusMessage
+                StatusMessage = statusMessage,
+                NetworkFeeSats = quote?.NetworkFee ?? 0,
+                GaslessNetworkFeeSats = quote?.GaslessNetworkFee ?? 0,
+                ProtocolFeeSats = quote?.ProtocolFee ?? 0,
+                ProtocolFeeRate = quote?.ProtocolFeeRate ?? 0,
+                MinAmountSats = quote?.MinAmount ?? 0,
+                MaxAmountSats = quote?.MaxAmount ?? 0,
+                BridgeFee = quote?.BridgeFee
+            };
+        }
+
+        private static ChainId ToChainId(Blockchains blockchain)
+        {
+            return blockchain switch
+            {
+                Blockchains.Arbitrum => new ChainId.Arbitrum(),
+                Blockchains.Ethereum => new ChainId.Ethereum(),
+                Blockchains.Polygon => new ChainId.Polygon(),
+                _ => new ChainId.Other(blockchain.ToString())
+            };
+        }
+
+        private static ChainId ToTargetChainId(string btcNetwork)
+        {
+            return btcNetwork switch
+            {
+                "BTC"       => new ChainId.Bitcoin(),
+                "LIGHTNING" => new ChainId.Lightning(),
+                "ARKADE"    => new ChainId.Arkade(),
+                _           => new ChainId.Other(btcNetwork)
+            };
+        }
+
+        private static TokenId ToTokenId(Stablecoins crypto, Blockchains network)
+        {
+            return (crypto, network) switch
+            {
+                (Stablecoins.USDC, Blockchains.Polygon)   => new TokenId.UsdcPolygon(),
+                (Stablecoins.USDC, Blockchains.Arbitrum)  => new TokenId.UsdcArbitrum(),
+                (Stablecoins.USDC, Blockchains.Ethereum)  => new TokenId.UsdcEthereum(),
+                (Stablecoins.USDT, Blockchains.Polygon)   => new TokenId.UsdtPolygon(),
+                (Stablecoins.USDT, Blockchains.Ethereum)  => new TokenId.UsdtEthereum(),
+                (Stablecoins.USDT0, Blockchains.Arbitrum) => new TokenId.Usdt0Arbitrum(),
+                (Stablecoins.WBTC, Blockchains.Polygon)   => new TokenId.WbtcPolygon(),
+                (Stablecoins.WBTC, Blockchains.Arbitrum)  => new TokenId.WbtcArbitrum(),
+                (Stablecoins.WBTC, Blockchains.Ethereum)  => new TokenId.WbtcEthereum(),
+                _ => new TokenId.Other($"{crypto}-{network}")
             };
         }
 

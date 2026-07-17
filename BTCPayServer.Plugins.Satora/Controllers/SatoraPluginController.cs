@@ -6,6 +6,7 @@ using BTCPayServer.Plugins.Satora.Services;
 using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Text;
 
 namespace BTCPayServer.Plugins.Satora.Controllers
 {
@@ -195,6 +196,14 @@ namespace BTCPayServer.Plugins.Satora.Controllers
                 fiatError = balance.FiatError,
                 refreshedAt = balance.RefreshedAt
             });
+        }
+
+        [HttpGet("swaps/export.csv")]
+        public async Task<IActionResult> ExportSwaps([FromRoute] string storeId, CancellationToken cancellationToken)
+        {
+            var csv = await pluginService.ExportSwapsCsvAsync(storeId, cancellationToken);
+            var fileName = $"satora-swaps-{storeId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.csv";
+            return File(Encoding.UTF8.GetBytes(csv), "text/csv", fileName);
         }
 
 

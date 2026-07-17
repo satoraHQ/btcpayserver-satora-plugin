@@ -49,12 +49,56 @@ Settlement target: **BTC on Arkade**.
 
 ## Status
 
-Deposit detection and server-side funding are wired up and working. The
-**claim + invoice-settlement step is currently disabled** pending a
-per-merchant wallet rework — see
-[`BTCPayServer.Plugins.Satora/docs/background-watcher.md`](BTCPayServer.Plugins.Satora/docs/background-watcher.md).
-Until that lands, swaps detect the deposit and server-fund the VHTLC but do not
-yet auto-complete into the merchant wallet. This is a work in progress.
+Deposit detection, server-side funding, Arkade claim and BTCPay invoice
+settlement are wired into the background watcher. Swap state is persisted in
+the plugin database and the watcher retries non-terminal swaps on restart.
+
+The plugin is still experimental. Terminal recovery states such as expired,
+invalid, late-funded or refunded swaps depend on SDK/contract-manager recovery
+behavior. The plugin does not expose an EVM refund workflow because the merchant
+wallet is Arkade/BTC-side only.
+
+On-chain Arkade-to-Bitcoin exits are not implemented yet because the local SDK
+does not currently expose an on-chain withdrawal API.
+
+## Operator guide
+
+1. Install the plugin package and restart BTCPay.
+2. Open the store's **Satora** wallet page.
+3. As the store owner, generate a new seed or restore an existing seed.
+4. Store the seed offline. The generated seed is displayed once.
+5. Re-enter the seed to confirm the backup. The wallet is enabled only after
+   this confirmation step.
+6. Enable Satora in the wallet configuration. The plugin syncs the native
+   Satora payment method and the store Lightning connection string.
+7. Use the wallet page to view Arkade balances, withdrawals and swap status.
+
+## Security model
+
+- Each store has its own BIP-39 seed. The seed is encrypted at rest in the
+  plugin settings row.
+- Only the store owner, or a server admin, can generate, import, confirm or
+  enable the wallet seed.
+- Withdrawals use BTCPay's store payout permission surface. Review and execute
+  are separate requests so the operator sees destination type, amount and fee
+  estimate before submission.
+- Stablecoin swaps are created from the BTCPay invoice's server-calculated
+  remaining due amount, not from a client-supplied amount.
+- Invoice settlement uses a deterministic payment id per swap so repeated
+  watcher runs do not settle the same invoice payment twice.
+
+## Recovery and monitoring
+
+- Non-terminal swaps are retried by the background watcher every 60 seconds.
+- The Satora wallet page lists every swap with a human status, action hint,
+  stale flag and retry button where retry is supported.
+- The page also shows total, active, needs-action, stale and completed swap
+  counts.
+- A CSV export is available from the swaps table for bookkeeping and external
+  reconciliation.
+- Terminal recovery states remain visible but are not force-refunded by the
+  plugin. Recovery should happen through the SDK contract manager so funds are
+  delivered to the BTC/Arkade side.
 
 ## Repository layout
 

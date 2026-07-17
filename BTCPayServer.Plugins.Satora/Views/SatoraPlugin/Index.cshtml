@@ -328,7 +328,7 @@
     }
     else
     {
-        var page = Context.Request.Query["page"].Count > 0 ? int.Parse(Context.Request.Query["page"]) : 1;
+        var page = int.TryParse(Context.Request.Query["page"].FirstOrDefault(), out var parsedPage) && parsedPage > 0 ? parsedPage : 1;
         var pageSize = 20;
         var totalItems = Model.Swaps.Count();
         var totalPages = (int)Math.Ceiling(totalItems / (double)pageSize);
@@ -336,6 +336,17 @@
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToList();
+
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+            <div class="d-flex flex-wrap gap-2">
+                <span class="badge badge-secondary">Total @Model.SwapSummary.Total</span>
+                <span class="badge badge-info">Active @Model.SwapSummary.Active</span>
+                <span class="badge badge-warning">Needs action @Model.SwapSummary.NeedsAction</span>
+                <span class="badge badge-warning">Stale @Model.SwapSummary.Stale</span>
+                <span class="badge badge-success">Completed @Model.SwapSummary.Completed</span>
+            </div>
+            <a asp-action="ExportSwaps" asp-route-storeId="@Model.Settings.StoreId" class="btn btn-sm btn-secondary">Export CSV</a>
+        </div>
 
         <div class="table-responsive">
             <table class="table table-hover mass-action">

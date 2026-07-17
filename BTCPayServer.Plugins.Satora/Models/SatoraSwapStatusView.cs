@@ -14,6 +14,8 @@ namespace BTCPayServer.Plugins.Satora.Models
 
         public bool NeedsManualAction { get; set; }
 
+        public bool IsStale { get; set; }
+
         public bool CanRetry { get; set; }
 
         public string? RetryUnavailableReason { get; set; }
