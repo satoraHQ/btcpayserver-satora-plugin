@@ -14,8 +14,9 @@ using SdkSwapFunding = uniffi.satora_sdk_ffi.SwapFunding;
 namespace BTCPayServer.Plugins.Satora.Lightning;
 
 // The store's Satora wallet as BTCPay's Lightning node, shaped after pseudozach's PR #2: invoices are
-// Lightning to Arkade swaps paid into the wallet. Reads come from the plugin database, which
-// SatoraLightningWorker keeps current; nothing here claims or moves money. ToString carries the
+// Lightning to Arkade swaps paid into the wallet, payments Arkade to Lightning swaps paid from it
+// (SatoraLightningPayments). Reads come from the plugin database, which SatoraLightningWorker and
+// SatoraOutgoingWorker keep current; nothing here claims or refunds. ToString carries the
 // connection key, so the client is never logged.
 public class SatoraLightningClient(
     string storeId,
@@ -25,6 +26,7 @@ public class SatoraLightningClient(
     SatoraLightningSwaps swaps,
     SatoraLightningInvoiceHub invoiceHub,
     SatoraClaimWindow claimWindow,
+    SatoraLightningPayments payments,
     ILogger<SatoraLightningClient> logger) : IExtendedLightningClient
 {
     // The swap server's limit on the invoice description.
@@ -35,7 +37,6 @@ public class SatoraLightningClient(
     public const int MaxFeePercent = 3;
     public const long MaxFeeFlatSats = 100;
     private const int ListLimit = 100;
-    private const string PayoutsUnavailable = "The Satora wallet does not pay Lightning invoices.";
 
     public string? DisplayName => "Satora (Arkade)";
 
@@ -85,7 +86,7 @@ public class SatoraLightningClient(
             if (refusal is not null)
                 throw refusal;
             return row;
-        });
+        }, cancellation);
         return SatoraLightningActions.ToInvoice(swap, DateTimeOffset.UtcNow);
     }
 
@@ -207,23 +208,24 @@ public class SatoraLightningClient(
     });
 
     public Task<PayResponse> Pay(string bolt11, CancellationToken cancellation = default) =>
-        Task.FromResult(new PayResponse(PayResult.Error, PayoutsUnavailable));
+        Pay(bolt11, null!, cancellation);
 
+    // Keysend: there is no invoice for the swap server to pay.
     public Task<PayResponse> Pay(PayInvoiceParams payParams, CancellationToken cancellation = default) =>
-        Task.FromResult(new PayResponse(PayResult.Error, PayoutsUnavailable));
+        Pay(null!, payParams, cancellation);
 
     public Task<PayResponse> Pay(string bolt11, PayInvoiceParams payParams, CancellationToken cancellation = default) =>
-        Task.FromResult(new PayResponse(PayResult.Error, PayoutsUnavailable));
+        payments.PayAsync(storeId, EnsureCurrentAsync, bolt11, payParams, network, cancellation);
 
-    // This client makes no payments.
-    public Task<LightningPayment> GetPayment(string paymentHash, CancellationToken cancellation = default) =>
-        Task.FromResult<LightningPayment>(null!);
+    // BTCPay's payout listener cancels a payout whose payment it cannot find, so a stored one is always returned.
+    public async Task<LightningPayment> GetPayment(string paymentHash, CancellationToken cancellation = default) =>
+        (await payments.GetPaymentAsync(storeId, paymentHash))!;
 
     public Task<LightningPayment[]> ListPayments(CancellationToken cancellation = default) =>
-        Task.FromResult(Array.Empty<LightningPayment>());
+        ListPayments(new ListPaymentsParams(), cancellation);
 
     public Task<LightningPayment[]> ListPayments(ListPaymentsParams request, CancellationToken cancellation = default) =>
-        Task.FromResult(Array.Empty<LightningPayment>());
+        payments.ListPaymentsAsync(storeId, request);
 
     public Task<OpenChannelResponse> OpenChannel(OpenChannelRequest openChannelRequest, CancellationToken cancellation = default) =>
         throw new NotSupportedException("The Satora wallet has no Lightning channels.");

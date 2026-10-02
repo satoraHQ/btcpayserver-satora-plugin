@@ -93,7 +93,9 @@ public class SatoraWalletService(
                 logger.LogInformation("{Change} the Satora wallet of store {StoreId}", enabled ? "Enabled" : "Disabled", storeId);
             if (enabled)
                 registry.Warm(storeId);
-            else
+            // Counted before the registry's gate too, which waits for every wallet action in flight,
+            // a long withdrawal included, and holds up new ones, the worker's claims among them.
+            else if (await CountOpenOperationsAsync(storeId) == 0)
                 await registry.EvictAsync(storeId, async () => await CountOpenOperationsAsync(storeId) == 0);
             await lightningConfig.SyncAsync(storeId, enabled, settings.LightningConnectionKey);
             return true;
@@ -104,7 +106,7 @@ public class SatoraWalletService(
         }
     }
 
-    public async Task<ArkadeBalance?> TryGetBalanceAsync(string storeId)
+    public virtual async Task<ArkadeBalance?> TryGetBalanceAsync(string storeId)
     {
         StoreWallet wallet;
         try
@@ -163,15 +165,15 @@ public class SatoraWalletService(
         }
     }
 
-    // Swaps (and, once they exist, withdrawals in an unknown state) that still need the store's
-    // current seed. Every table that holds such rows adds its count here. Rows from before the
-    // current seed was created belong to a seed it replaced: a replace needs none of them open. A
-    // restore over a legacy seed goes ahead with rows open, as SeedWriteGuard says.
+    // Swaps in either direction, and withdrawals whose outcome only the owner can tell, that still
+    // need the store's current seed. Every table that holds such rows adds its count here. Rows from
+    // before the current seed was created belong to a seed it replaced: a replace needs none of them
+    // open. A restore over a legacy seed goes ahead with rows open, as SeedWriteGuard says.
     public async Task<int> CountOpenOperationsAsync(string storeId)
     {
         await using var ctx = dbContextFactory.CreateContext();
         var open = await OpenOperationsAsync(ctx, storeId);
-        return await open.Swaps.CountAsync() + await open.LightningSwaps.CountAsync();
+        return await open.Swaps.CountAsync() + await open.LightningSwaps.CountAsync() + await open.Withdrawals.CountAsync();
     }
 
     // What CountOpenOperationsAsync counts, for the store to find: swaps that pay an invoice by their
@@ -191,6 +193,9 @@ public class SatoraWalletService(
             incoming.Select(s => invoices.GetValueOrDefault(s.PaymentHash)).OfType<string>().ToList());
         Add("Lightning swaps BTCPay has no invoice for",
             incoming.Where(s => !invoices.ContainsKey(s.PaymentHash)).Select(s => s.SwapId).ToList());
+        Add("Lightning payments", lightning.Where(s => s.Direction == SatoraLightningDirection.ArkadeToLightning).Select(s => s.SwapId).ToList());
+        Add("withdrawals to mark sent or failed on the withdrawals page",
+            await open.Withdrawals.OrderBy(w => w.CreatedAt).Select(w => w.Id).ToListAsync());
         Add("swaps of an earlier plugin version", await open.Swaps.OrderBy(t => t.DateT).Select(t => t.TxID).ToListAsync());
         return string.Join("; ", parts);
 
@@ -204,7 +209,8 @@ public class SatoraWalletService(
 
     private sealed record OpenOperations(
         IQueryable<SatoraTx> Swaps,
-        IQueryable<SatoraLightningSwap> LightningSwaps);
+        IQueryable<SatoraLightningSwap> LightningSwaps,
+        IQueryable<SatoraWithdrawal> Withdrawals);
 
     private static async Task<OpenOperations> OpenOperationsAsync(SatoraPluginDbContext ctx, string storeId)
     {
@@ -215,13 +221,15 @@ public class SatoraWalletService(
         var swaps = ctx.SatoraTransactions.Where(t =>
             t.StoreId == storeId && (t.Status == null || !SeedWriteGuard.SeedNotNeededStatuses.Contains(t.Status)));
         var lightningSwaps = ctx.SatoraLightningSwaps.Where(s => s.StoreId == storeId && s.CompletedAt == null);
+        var withdrawals = SatoraWithdrawals.Unresolved(ctx.SatoraWithdrawals.Where(w => w.StoreId == storeId));
         if (walletCreated is { } created)
         {
             var since = created.UtcDateTime;
             swaps = swaps.Where(t => t.DateT >= since);
             lightningSwaps = lightningSwaps.Where(s => s.CreatedAt >= created);
+            withdrawals = withdrawals.Where(w => w.CreatedAt >= created);
         }
-        return new OpenOperations(swaps, lightningSwaps);
+        return new OpenOperations(swaps, lightningSwaps, withdrawals);
     }
 
     private async Task<SeedWriteRefusal> WriteSeedAsync(string storeId, string mnemonic, SeedWriteKind kind, string? confirmation)
@@ -284,6 +292,10 @@ public class SatoraWalletService(
                 await lightningConfig.SyncAsync(storeId, settings.Enabled, settings.LightningConnectionKey);
                 return SeedWriteRefusal.None;
             }
+            // Counted before the registry's gate too, which waits for every wallet action in flight,
+            // a long withdrawal included, and holds up new ones, the worker's claims among them.
+            if (await CountOpenOperationsAsync(storeId) > 0)
+                return SeedWriteRefusal.OpenOperations;
             // Counted inside the registry's gate, so no swap can be created from the old wallet after
             // the count and be stranded by the replace.
             var replaced = await registry.ReplaceAsync(storeId, async wallet =>

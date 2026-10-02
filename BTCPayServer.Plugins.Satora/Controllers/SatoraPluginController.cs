@@ -136,7 +136,8 @@ namespace BTCPayServer.Plugins.Satora.Controllers
             {
                 confirmedSats = balance.confirmedSats,
                 preConfirmedSats = balance.preConfirmedSats,
-                recoverableSats = balance.recoverableSats
+                recoverableSats = balance.recoverableSats,
+                canSettle = balance.recoverableSats >= SatoraWithdrawalService.DustSats
             });
         }
 
@@ -194,7 +195,7 @@ namespace BTCPayServer.Plugins.Satora.Controllers
         }
 
         private static string OpenOperations(string named) =>
-            "The wallet cannot be replaced while swaps that depend on it are open" + (named.Length > 0 ? $" ({named})" : "") +
-            ". Disable the wallet so no new swaps start, and try again once these are finished.";
+            "The wallet cannot be replaced while swaps or withdrawals that depend on it are open" + (named.Length > 0 ? $" ({named})" : "") +
+            ". Disable the wallet so no new swaps start, and try again once these are finished or marked.";
     }
 }

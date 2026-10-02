@@ -11,7 +11,8 @@ namespace BTCPayServer.Plugins.Satora.Services
         ILogger<SatoraPluginService> logger,
         SatoraService satoraService,
         SatoraSettlementService settlementService,
-        SatoraWalletService walletService)
+        SatoraWalletService walletService,
+        SatoraWithdrawalService withdrawalService)
     {
 
         public async Task<string> GetCheckoutSeedAsync(string storeId)
@@ -44,6 +45,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                     Enabled = status.Enabled,
                     WalletState = status.State,
                     NetworkError = walletService.NetworkError,
+                    AutomatedLightningPayouts = await withdrawalService.HasAutomatedLightningPayoutsAsync(storeId),
                     Transactions = txs
                 };
             }

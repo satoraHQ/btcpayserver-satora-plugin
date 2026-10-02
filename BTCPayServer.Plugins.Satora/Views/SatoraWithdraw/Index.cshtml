@@ -1,0 +1,267 @@
+@using System.Globalization
+@using BTCPayServer.Abstractions.Extensions
+@using BTCPayServer.Abstractions.Models
+@using BTCPayServer.Plugins.Satora.Models
+@using BTCPayServer.Plugins.Satora.Services
+@using BTCPayServer.Plugins.Satora.Views
+
+@model SatoraWithdrawPageModel
+@{
+    ViewData.SetLayoutModel(new LayoutModel(nameof(PluginNavPages.Index), "Satora withdrawals")
+    { ActiveCategory = nameof(PluginNavPages) });
+    string Btc(long? sats) => sats is { } s ? (s / 100_000_000m).ToString("0.00000000", CultureInfo.InvariantCulture) + " BTC" : "everything";
+    string Status(SatoraWithdrawal w) => w is { Status: SatoraWithdrawalStatus.Pending, SwapId: null }
+        ? (Model.Running.Contains(w.Id) ? "Running" : "Interrupted")
+        : w.Status.ToString();
+    bool CanResolve(SatoraWithdrawal w) => SatoraWithdrawals.OwnerCanResolve(w, Model.Running.Contains(w.Id), Model.Now);
+}
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <h2 class="mb-0">Withdraw from the Satora wallet</h2>
+    <a asp-controller="SatoraPlugin" asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">Back to Satora</a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<partial name="_SatoraSpendingBoundary" model="Model.AutomatedLightningPayouts" />
+
+@if (Model.Unavailable is not null)
+{
+    <div class="alert alert-danger">@Model.Unavailable</div>
+}
+else
+{
+    <partial name="_SatoraWalletBalance" model="Model.StoreId" />
+    var recoverableSats = Model.Review?.RecoverableSats ?? 0;
+    <form method="post" asp-action="Settle" asp-route-storeId="@Model.StoreId" class="mb-4 @(recoverableSats >= SatoraWithdrawalService.DustSats ? "" : "d-none")" data-satora-recoverable="settle">
+        <p class="mb-2">Recoverable funds cannot be withdrawn until they are settled. Settling can take a few minutes.</p>
+        <button type="submit" class="btn btn-outline-primary">Settle recoverable funds</button>
+    </form>
+    <p class="mb-4 @(recoverableSats is > 0 and < SatoraWithdrawalService.DustSats ? "" : "d-none")" data-satora-recoverable="dust">
+        Recoverable funds cannot be withdrawn until they are settled. The current amount is too small to settle until more funds become
+        recoverable.
+    </p>
+
+    @if (Model.Unresolved.Any())
+    {
+        <div class="alert alert-danger">@SatoraWithdrawalService.UnresolvedMessage</div>
+        @foreach (var w in Model.Unresolved)
+        {
+            var explorer = TokenFormat.ExplorerUrl(w.Destination, "Btc");
+            <div class="border rounded p-3 mb-3">
+                <div class="d-flex flex-wrap gap-4">
+                    <div><div class="text-secondary small">Destination type</div><strong>@SatoraWithdrawDestinations.Display(w.Type)</strong></div>
+                    <div><div class="text-secondary small">Amount</div><strong>@Btc(w.AmountSats)</strong></div>
+                    <div><div class="text-secondary small">Started</div><strong>@w.CreatedAt.ToString("u", CultureInfo.InvariantCulture)</strong></div>
+                    <div><div class="text-secondary small">Status</div><strong>@Status(w)</strong></div>
+                </div>
+                <div class="mt-3">
+                    <div class="text-secondary small">Destination</div>
+                    @if (explorer is not null)
+                    {
+                        <a href="@explorer" target="_blank" rel="noreferrer noopener" class="text-break">@w.Destination</a>
+                    }
+                    else
+                    {
+                        <code class="text-break">@w.Destination</code>
+                    }
+                </div>
+                @if (!string.IsNullOrEmpty(w.Error))
+                {
+                    <div class="mt-3"><div class="text-secondary small">Error</div><span class="text-break">@w.Error</span></div>
+                }
+                @if (CanResolve(w))
+                {
+                    <p class="mt-3 mb-2">Check the balance above and the withdrawals below. Mark it sent if the funds left the wallet, or failed if they are still in it.</p>
+                    <div class="d-flex gap-2">
+                        <form method="post" asp-action="Resolve" asp-route-storeId="@Model.StoreId" asp-route-withdrawalId="@w.Id">
+                            <input type="hidden" name="Sent" value="true" />
+                            <button type="submit" class="btn btn-outline-primary">Mark as sent</button>
+                        </form>
+                        <form method="post" asp-action="Resolve" asp-route-storeId="@Model.StoreId" asp-route-withdrawalId="@w.Id">
+                            <input type="hidden" name="Sent" value="false" />
+                            <button type="submit" class="btn btn-outline-danger">Mark as failed</button>
+                        </form>
+                    </div>
+                }
+                else if (Model.Running.Contains(w.Id))
+                {
+                    <p class="mt-3 mb-0 text-secondary">This withdrawal is still running.</p>
+                }
+                else
+                {
+                    <p class="mt-3 mb-0 text-secondary">It may still go through. It can be marked from @((w.CreatedAt + SatoraWithdrawals.InterruptedAfter).ToString("u", CultureInfo.InvariantCulture)).</p>
+                }
+            </div>
+        }
+    }
+    else
+    {
+        var request = Model.Review?.Request ?? new SatoraWithdrawRequest();
+        <form method="post" asp-action="Review" asp-route-storeId="@Model.StoreId" class="mb-3">
+            <div class="form-group">
+                <label for="Destination" class="form-label">Destination</label>
+                <input id="Destination" name="Destination" class="form-control" value="@request.Destination" autocomplete="off" spellcheck="false" />
+                <div class="form-text">An Arkade address, a Lightning invoice, Lightning address or LNURL, or a Bitcoin address or BIP21 URI.</div>
+            </div>
+            <div class="form-group">
+                <label for="AmountBtc" class="form-label">Amount (BTC)</label>
+                <input id="AmountBtc" name="AmountBtc" class="form-control w-auto" value="@request.AmountBtc" inputmode="decimal" autocomplete="off" />
+                <div class="form-text">Leave it empty for a Lightning invoice or a BIP21 URI with an amount.</div>
+            </div>
+            <div class="form-check mb-3">
+                <input id="SendAll" name="SendAll" value="true" type="checkbox" class="form-check-input" checked="@request.SendAll" />
+                <label for="SendAll" class="form-check-label">Send everything the wallet can spend (not for a Lightning invoice)</label>
+            </div>
+            <button type="submit" class="btn btn-primary">Review withdrawal</button>
+        </form>
+
+        @if (Model.Review is { } review)
+        {
+            <div class="border rounded p-3 mb-4">
+                @if (review.Error is not null)
+                {
+                    <div class="alert alert-warning mb-0">@review.Error</div>
+                }
+                else
+                {
+                    <div class="d-flex flex-wrap gap-4">
+                        <div><div class="text-secondary small">Destination type</div><strong>@SatoraWithdrawDestinations.Display(review.Type)</strong></div>
+                        <div><div class="text-secondary small">Amount</div><strong>@Btc(review.AmountSats)</strong></div>
+                        <div><div class="text-secondary small">Fees</div><strong>@Btc(review.FeeSats)</strong></div>
+                        <div><div class="text-secondary small">Total</div><strong>@Btc(review.TotalSats)</strong></div>
+                        <div><div class="text-secondary small">Spendable balance</div><strong>@Btc(review.AvailableSats)</strong></div>
+                    </div>
+                    <div class="mt-3">
+                        <div class="text-secondary small">Destination</div>
+                        <code class="text-break">@review.Destination</code>
+                    </div>
+                    @if (SatoraWithdrawDestinations.IsLightning(review.Type))
+                    {
+                        <div class="form-text mt-3">If the fees rise above this quote before the payment starts, nothing is sent.</div>
+                    }
+                    else if (review.Type == SatoraWithdrawalType.Bitcoin)
+                    {
+                        <div class="form-text mt-3">If the fee rises above this quote before the withdrawal starts, nothing is sent. The wallet keeps 330 sats as Arkade change.</div>
+                    }
+                    else
+                    {
+                        <div class="form-text mt-3">Arkade funds sent from this wallet can expire within minutes. If the receiving wallet is not online to renew them in time, getting them back depends on the Arkade server.</div>
+                    }
+                    <form method="post" asp-action="Execute" asp-route-storeId="@Model.StoreId" class="mt-3">
+                        <input type="hidden" name="Key" value="@review.Key" />
+                        <input type="hidden" name="Destination" value="@review.Request.Destination" />
+                        <input type="hidden" name="AmountBtc" value="@review.Request.AmountBtc" />
+                        <input type="hidden" name="SendAll" value="@(review.Request.SendAll ? "true" : "false")" />
+                        <input type="hidden" name="MaxTotalSats" value="@review.TotalSats" />
+                        <input type="hidden" name="MaxFeeSats" value="@review.FeeSats" />
+                        <button type="submit" class="btn btn-danger">Confirm and withdraw</button>
+                    </form>
+                }
+                @if (review.RecoverableSats > 0)
+                {
+                    <div class="form-text mt-3">@Btc(review.RecoverableSats) of recoverable funds is not included and stays in the wallet until it is settled.</div>
+                }
+            </div>
+        }
+    }
+}
+
+@if (Model.Unfinished.Any())
+{
+    <h4>Unfinished Lightning payments</h4>
+    <p>
+        These payments did not complete on their own. Check the wallet's balance and ask the payee whether the invoice was paid, then
+        close the payment. Closing updates the payout or withdrawal it paid and cannot be undone.
+    </p>
+    @foreach (var swap in Model.Unfinished)
+    {
+        var held = Model.UnfinishedHeld.GetValueOrDefault(swap.SwapId);
+        <div class="border rounded p-3 mb-3">
+            <div class="d-flex flex-wrap gap-4">
+                <div><div class="text-secondary small">Swap</div><code>@swap.SwapId</code></div>
+                <div><div class="text-secondary small">Invoice amount</div><strong>@Btc(swap.AmountMsat / 1000)</strong></div>
+                <div><div class="text-secondary small">Taken from the wallet</div><strong>@Btc(swap.FundingSats)</strong></div>
+                <div><div class="text-secondary small">Still held in the swap</div><strong>@(held is null ? "Could not be read" : Btc((long)(held.SpendableSats + held.RecoverableSats)))</strong></div>
+                <div><div class="text-secondary small">Last status</div><strong>@swap.Status</strong></div>
+                <div><div class="text-secondary small">Refund locktime</div><strong>@swap.ClaimCutoff.ToString("u", CultureInfo.InvariantCulture)</strong></div>
+            </div>
+            @if (swap.RefundTxId is not null)
+            {
+                <div class="mt-3"><div class="text-secondary small">Refund transaction</div><code class="text-break">@TokenFormat.BareTxId(swap.RefundTxId)</code></div>
+            }
+            <form method="post" asp-action="ClosePayment" asp-route-storeId="@Model.StoreId" asp-route-swapId="@swap.SwapId" class="mt-3">
+                <div class="form-check">
+                    <input id="Paid@(swap.SwapId)" name="Paid" value="true" type="radio" class="form-check-input" />
+                    <label for="Paid@(swap.SwapId)" class="form-check-label">The invoice was paid</label>
+                </div>
+                <div class="form-check">
+                    <input id="Back@(swap.SwapId)" name="Paid" value="false" type="radio" class="form-check-input" />
+                    <label for="Back@(swap.SwapId)" class="form-check-label">The funds are back in the wallet</label>
+                </div>
+                <div class="form-text mb-2">If the invoice was not paid and the funds are not back yet, leave the payment open. The funds return to the wallet automatically about an hour after the refund locktime.</div>
+                <div class="d-flex flex-wrap gap-2 align-items-end">
+                    <div>
+                        <label for="Close@(swap.SwapId)" class="form-label">Type @SatoraWithdrawalService.CloseConfirmationWord to close it</label>
+                        <input id="Close@(swap.SwapId)" name="Confirmation" class="form-control" autocomplete="off" />
+                    </div>
+                    <button type="submit" class="btn btn-outline-danger">Close payment</button>
+                </div>
+            </form>
+        </div>
+    }
+}
+
+<h4>Withdrawals</h4>
+@if (!Model.Withdrawals.Any())
+{
+    <p><i>No withdrawals yet.</i></p>
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-hover">
+            <thead>
+                <tr>
+                    <th class="text-nowrap">Started</th>
+                    <th class="text-nowrap">Type</th>
+                    <th>Destination</th>
+                    <th class="text-nowrap text-end">Amount</th>
+                    <th class="text-nowrap text-end">Fee</th>
+                    <th class="text-nowrap">Status</th>
+                    <th>Transaction</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var w in Model.Withdrawals)
+                {
+                    <tr>
+                        <td class="text-nowrap">@w.CreatedAt.ToString("u", CultureInfo.InvariantCulture)</td>
+                        <td class="text-nowrap">@SatoraWithdrawDestinations.Display(w.Type)</td>
+                        <td class="text-break"><code>@w.Destination</code></td>
+                        <td class="text-nowrap text-end">@Btc(w.AmountSats)</td>
+                        <td class="text-nowrap text-end">@(w.FeeSats is null ? "" : Btc(w.FeeSats))</td>
+                        <td>
+                            <strong>@Status(w)</strong>
+                            @if (!string.IsNullOrEmpty(w.Error))
+                            {
+                                <div class="text-secondary small text-break">@w.Error</div>
+                            }
+                        </td>
+                        <td class="text-break small">
+                            @if (w.TxId is not null)
+                            {
+                                <div class="text-secondary">@(w.Type == SatoraWithdrawalType.Bitcoin ? "Bitcoin transaction" : "Arkade transaction")</div>
+                                <div><code>@TokenFormat.BareTxId(w.TxId)</code></div>
+                            }
+                            @if (w.SwapId is not null)
+                            {
+                                <div class="text-secondary">Swap <code>@w.SwapId</code></div>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
