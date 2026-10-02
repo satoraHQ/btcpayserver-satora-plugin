@@ -177,15 +177,6 @@ namespace BTCPayServer.Plugins.Satora.Services
                 model.BackendError = e.Message;
             }
 
-            try
-            {
-                model.DerivedArkadeAddress = await satoraService.GetArkadeAddressAsync(storeSettings.Seed);
-            }
-            catch (Exception e)
-            {
-                logger.LogWarning(e, "SatoraPlugin:GetSwapDetailsAsync({SwapId}): derived address lookup failed", swapId);
-            }
-
             return model;
         }
 

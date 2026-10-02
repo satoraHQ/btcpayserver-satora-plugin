@@ -4,6 +4,9 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace BTCPayServer.Plugins.Satora.Controllers
 {
+    // Kept out of MVC routing, as every action here is anonymous and Continue drives any swap forward
+    // to a claim destination the caller picks.
+    [NonController]
     [Route("~/plugins/{storeId}/SatoraSwap")]
     public class SatoraSwapController(SatoraService satoraService, SatoraPluginService pluginService) : Controller
     {

@@ -1,0 +1,46 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, test and pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Set up just
+        uses: extractions/setup-just@v2
+      - name: Build
+        run: just build
+      - name: Test
+        run: just test
+      - name: Pack
+        run: just pack
+      - name: Verify package
+        run: just verify-pack
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: BTCPayServer.Plugins.Satora
+          path: dist/
+          if-no-files-found: error

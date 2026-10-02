@@ -1,106 +1,12 @@
-# Satora — Stablecoin payments for BTCPay Server
+# Satora plugin for BTCPay Server
 
-> # ⚠️ NOT PRODUCTION READY — UNDER HEAVY DEVELOPMENT
->
-> **This plugin is experimental and under active development. It is NOT ready
-> for real use.** Do **not** install it on a production BTCPay Server and do
-> **not** point real funds at it. Swaps do not yet complete end-to-end (see
-> [Status](#status)); APIs, data schemas and behaviour may change or break
-> without notice; and bugs may result in **loss of funds**. Use only at your 
-> own risk.
+Satora is a [BTCPay Server](https://btcpayserver.org) plugin that gives each
+store its own wallet on [Arkade](https://arkade.money). The plugin's page shows
+the wallet's balance and the store's earlier stablecoin swaps.
 
-Satora is a [BTCPay Server](https://btcpayserver.org) plugin that lets a store
-accept **stablecoin payments** (USDC, USDT, and others across Polygon, Arbitrum
-and Ethereum) and receive the value as **BTC on [Arkade](https://arkade.money)**
-— non-custodially, via atomic swaps.
+## Requirements
 
-The customer pays in the stablecoin of their choice at checkout; the plugin
-runs the swap and the merchant ends up with BTC in a store-owned Arkade wallet.
-There is no third-party custodian in the path: the store holds its own keys.
-
-## How it works
-
-1. **Embedded Arkade wallet.** Each store gets its own Arkade wallet, derived
-   from an encrypted BIP-39 seed stored per-store. The wallet is provided by the
-   embedded [`Satora.Sdk`](https://github.com/lendasat/lendaswap) — the plugin
-   does **not** depend on any other BTCPay plugin.
-
-2. **Checkout.** When a customer selects a stablecoin, the plugin creates a swap
-   (EVM stablecoin → BTC on Arkade) and shows the customer a deposit address to
-   send funds to.
-
-3. **Background settlement.** A background watcher (`SatoraSwapWatcher`, ~60s
-   interval) drives every in-flight swap forward:
-    - polls the deposit address on-chain until the customer's funds arrive,
-    - submits the gasless funding step (the server pays gas),
-    - claims the resulting BTC into the store's Arkade wallet,
-    - marks the BTCPay invoice paid, recording a real Arkade payment against it.
-
-Everything is keyed by swap id, so the address shown to the customer is always
-the address the watcher monitors.
-
-## Supported assets
-
-Stablecoins/tokens: **USDC, USDT, USDT0, EURC, tBTC, USAT, WBTC, XAUt**
-Chains: **Ethereum, Polygon, Arbitrum**
-(availability varies per token — see `Models/SatoraData.cs`)
-
-Settlement target: **BTC on Arkade**.
-
-## Status
-
-Deposit detection and server-side funding are wired up and working. The
-**claim + invoice-settlement step is currently disabled** pending a
-per-merchant wallet rework — see
-[`BTCPayServer.Plugins.Satora/docs/background-watcher.md`](BTCPayServer.Plugins.Satora/docs/background-watcher.md).
-Until that lands, swaps detect the deposit and server-fund the VHTLC but do not
-yet auto-complete into the merchant wallet. This is a work in progress.
-
-## Repository layout
-
-| Path                           | What                                                           |
-|--------------------------------|----------------------------------------------------------------|
-| `BTCPayServer.Plugins.Satora/` | The plugin source                                              |
-| `btcpayserver/`                | BTCPay Server checkout, referenced by the plugin at build time |
-
-## Building
-
-This repo uses a [`justfile`](justfile). To build the plugin:
-
-```bash
-just build
-```
-
-Equivalently, the plugin references the local `btcpayserver` checkout, so you
-can build it directly from the plugin directory:
-
-```bash
-cd BTCPayServer.Plugins.Satora
-dotnet build -c Release
-```
-
-## Packaging a `.btcpay`
-
-To build and produce an installable `.btcpay` package in one step:
-
-```bash
-just package
-```
-
-Under the hood this runs BTCPay's plugin packer (included in the `btcpayserver`
-checkout):
-
-```bash
-# from the repository root
-dotnet run --project btcpayserver/BTCPayServer.PluginPacker -- \
-  BTCPayServer.Plugins.Satora/bin/Release/net10.0 \
-  BTCPayServer.Plugins.Satora \
-  BTCPayServer.Plugins.Satora/dist
-```
-
-The package is written to
-`BTCPayServer.Plugins.Satora/dist/BTCPayServer.Plugins.Satora/<version>/BTCPayServer.Plugins.Satora.btcpay`.
-(The `dist/` directory is git-ignored.)
+BTCPay Server 2.4.2 or later.
 
 ## Installing
 
@@ -126,5 +32,56 @@ WHERE "Id" = 'BTCPayServer.Plugins.Satora.PluginMigrationRunner+PluginDataMigrat
 
 Then restart BTCPay so the plugin recreates the schema on boot.
 
-⚠️ Dropping `SatoraSettings` destroys the encrypted Arkade wallet seed — any
-funds held in that wallet become unrecoverable.
+**Warning:** dropping `SatoraSettings` deletes each store's encrypted wallet
+seed. Without a copy of its seed phrase, the wallet's funds are lost.
+
+## Repository layout
+
+| Path                                 | What                                                           |
+|--------------------------------------|----------------------------------------------------------------|
+| `BTCPayServer.Plugins.Satora/`       | The plugin source                                              |
+| `BTCPayServer.Plugins.Satora.Tests/` | Unit tests (xunit), run without a BTCPay host                  |
+| `btcpayserver/`                      | BTCPay Server checkout, referenced by the plugin at build time |
+
+## Development
+
+The plugin builds against BTCPay Server v2.4.4 (the `btcpayserver/` submodule).
+`global.json` requires a .NET 10 SDK, 10.0.400 (the one BTCPay 2.4.4's Docker
+build uses) or later; the newest installed 10.0 SDK is picked.
+
+```bash
+git submodule update --init
+just build        # Release build of the plugin
+just test         # unit tests
+just pack         # dist/BTCPayServer.Plugins.Satora/<version>/BTCPayServer.Plugins.Satora.btcpay
+just verify-pack  # fails unless the .btcpay has linux-x64 and linux-arm64 native libraries
+```
+
+`just pack` runs BTCPay's plugin packer (`btcpayserver/BTCPayServer.PluginPacker`)
+on the build output.
+
+### Satora.Sdk
+
+By default the plugin uses the `Satora.Sdk` package from nuget.org, the only
+feed in `nuget.config`. Restoring it, locally or in CI, needs no credentials.
+
+To work against a local SDK instead, set `SatoraSdkPath` to the absolute path
+of the `client-sdk/dotnet-sdk` directory in a checkout of satoraHQ/swap. A
+relative path does not work, because MSBuild resolves it against each
+project's own directory. Build the SDK's native library first (Rust and
+`protoc` required):
+
+```bash
+(cd ../swap/client-sdk/dotnet-sdk && just build-native)   # native/target/debug
+export SatoraSdkPath=$PWD/../swap/client-sdk/dotnet-sdk
+just build test
+```
+
+MSBuild reads `SatoraSdkPath` from the environment, so plain `dotnet build` and
+`dotnet test` pick it up too. The build copies the host library to
+`runtimes/<rid>/native/`, where the SDK's resolver looks first; that is enough
+to run BTCPay locally with the plugin. BTCPay's Docker images are Linux, so a
+`.btcpay` built this way also needs the library built for
+`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`
+(`native/target/<triple>/release/`); without them `just verify-pack` fails. CI
+runs the same check on a package built from the published `Satora.Sdk`.

@@ -9,7 +9,7 @@
   <!-- Plugin specific properties -->
   <PropertyGroup>
     <Product>Satora</Product>
-    <Description>Allows your customers to pay in Stablecoins with Satora in a seamless and non custodial way. Please read our documentation for updates history</Description>
+    <Description>Gives each store its own wallet on Arkade.</Description>
     <Version>0.1.1</Version>
   </PropertyGroup>
 
@@ -32,12 +32,12 @@
   </ItemDefinitionGroup>
 
   <ItemGroup Condition="$(Configuration) != 'Release'">
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.0">
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
   </ItemGroup>
 
   <ItemGroup>
@@ -48,8 +48,41 @@
     <EmbeddedResource Include="Resources\**" />
   </ItemGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(SatoraSdkPath)' == ''">
     <PackageReference Include="Satora.Sdk" Version="0.1.0-ci.20260526.24.sha-bc55b9b" />
+  </ItemGroup>
+
+  <!--
+    -p:SatoraSdkPath=<client-sdk/dotnet-sdk checkout> builds against a local SDK instead of the package.
+    Private and ExcludeAssets override the BTCPay-only ItemDefinitionGroup defaults so Satora.Sdk.dll
+    ships with the plugin. Native libraries go to runtimes/<rid>/native as in the package, where the
+    SDK's NativeLibraryResolver looks first: the host build from `cargo build`, plus Linux release
+    builds when present so a local .btcpay can carry them. On a Linux host, a release build for the
+    host's RID takes the place of the debug one rather than being overwritten by it.
+  -->
+  <PropertyGroup Condition="'$(SatoraSdkPath)' != ''">
+    <SatoraSdkNativeTarget>$(SatoraSdkPath)/native/target</SatoraSdkNativeTarget>
+    <SatoraSdkHostNativeName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libsatora_sdk_ffi.dylib</SatoraSdkHostNativeName>
+    <SatoraSdkHostNativeName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libsatora_sdk_ffi.so</SatoraSdkHostNativeName>
+    <SatoraSdkHostNativeName Condition="$([MSBuild]::IsOSPlatform('Windows'))">satora_sdk_ffi.dll</SatoraSdkHostNativeName>
+    <SatoraSdkHostTriple Condition="'$(NETCoreSdkPortableRuntimeIdentifier)' == 'linux-x64'">x86_64-unknown-linux-gnu</SatoraSdkHostTriple>
+    <SatoraSdkHostTriple Condition="'$(NETCoreSdkPortableRuntimeIdentifier)' == 'linux-arm64'">aarch64-unknown-linux-gnu</SatoraSdkHostTriple>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(SatoraSdkPath)' != ''">
+    <ProjectReference Include="$(SatoraSdkPath)/Satora.Sdk/Satora.Sdk.csproj" Private="true" ExcludeAssets="none" />
+    <None Include="$(SatoraSdkNativeTarget)/debug/$(SatoraSdkHostNativeName)"
+          Condition="Exists('$(SatoraSdkNativeTarget)/debug/$(SatoraSdkHostNativeName)') And ('$(SatoraSdkHostTriple)' == '' Or !Exists('$(SatoraSdkNativeTarget)/$(SatoraSdkHostTriple)/release/$(SatoraSdkHostNativeName)'))"
+          Link="runtimes/$(NETCoreSdkPortableRuntimeIdentifier)/native/$(SatoraSdkHostNativeName)"
+          CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="$(SatoraSdkNativeTarget)/x86_64-unknown-linux-gnu/release/libsatora_sdk_ffi.so"
+          Condition="Exists('$(SatoraSdkNativeTarget)/x86_64-unknown-linux-gnu/release/libsatora_sdk_ffi.so')"
+          Link="runtimes/linux-x64/native/libsatora_sdk_ffi.so"
+          CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="$(SatoraSdkNativeTarget)/aarch64-unknown-linux-gnu/release/libsatora_sdk_ffi.so"
+          Condition="Exists('$(SatoraSdkNativeTarget)/aarch64-unknown-linux-gnu/release/libsatora_sdk_ffi.so')"
+          Link="runtimes/linux-arm64/native/libsatora_sdk_ffi.so"
+          CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
 </Project>

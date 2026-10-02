@@ -11,7 +11,7 @@ public class SatoraSettings
     public string StoreId { get; set; }
 
 
-    [Display(Name = "Enabled in checkout")]
+    [Display(Name = "Enabled")]
     public bool Enabled { get; set; }
 
     public string? CryptedSeed { get; set; }
