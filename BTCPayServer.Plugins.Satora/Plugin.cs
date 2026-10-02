@@ -1,7 +1,10 @@
+using System.Runtime.CompilerServices;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Models;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Services;
+
+[assembly: InternalsVisibleTo("BTCPayServer.Plugins.Satora.Tests")]
 
 namespace BTCPayServer.Plugins.Satora;
 
@@ -18,6 +21,13 @@ public class Plugin : BaseBTCPayServerPlugin
         services.AddUIExtension("store-wallets-nav", "SatoraPluginHeaderNav")
                 .AddSingleton<SatoraPluginDbContextFactory>()
                 .AddHostedService<PluginMigrationRunner>()
+                .AddSingleton<SatoraSeedProtector>()
+                .AddSingleton<SatoraNotifier>()
+                .AddSingleton<SatoraWalletRegistry>()
+                // After PluginMigrationRunner, so the tables exist when it prepares the enabled wallets.
+                .AddSingleton<IHostedService>(s => s.GetRequiredService<SatoraWalletRegistry>())
+                .AddSingleton<SatoraWalletService>()
+                .AddSingleton<INotificationHandler, SatoraWalletLockedNotification.Handler>()
                 .AddSingleton<SatoraSettlementService>()
                 .AddSingleton<SatoraService>()
                 .AddSingleton<SatoraPluginService>();

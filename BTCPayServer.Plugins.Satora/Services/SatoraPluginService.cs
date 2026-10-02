@@ -1,7 +1,6 @@
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Models;
 using Microsoft.EntityFrameworkCore;
-using NBitcoin;
 using Satora.Sdk;
 using uniffi.satora_sdk_ffi;
 
@@ -11,88 +10,46 @@ namespace BTCPayServer.Plugins.Satora.Services
         SatoraPluginDbContextFactory pluginDbContextFactory,
         ILogger<SatoraPluginService> logger,
         SatoraService satoraService,
-        SatoraSettlementService settlementService)
+        SatoraSettlementService settlementService,
+        SatoraWalletService walletService)
     {
 
-        public async Task<SatoraSettings> GetStoreSettings(string storeId)
+        public async Task<string> GetCheckoutSeedAsync(string storeId)
         {
-            try
-            {
-                await using var _context = pluginDbContextFactory.CreateContext();
-                var settings = await _context.SatoraSettings.FirstOrDefaultAsync(a => a.StoreId == storeId);
-                if (settings == null)
-                {
-                    settings = new SatoraSettings
-                    {
-                        StoreId = storeId,
-                        Enabled = false,
-                        Seed = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString()
-                    };
-                }
-                return settings;
-            }
-            catch (Exception e)
-            {
-                logger.LogError(e, "SatoraPlugin:GetStoreSettings()");
-                throw;
-            }
+            var status = await walletService.GetStatusAsync(storeId);
+            return status.Enabled && status.Mnemonic is not null
+                ? status.Mnemonic
+                : throw new InvalidOperationException("Satora is not enabled for this store.");
         }
+
+        // Unlike checkout, reading an earlier swap does not need the wallet to be enabled.
+        private async Task<string> RequireSeedAsync(string storeId) =>
+            (await walletService.GetStatusAsync(storeId)).Mnemonic
+            ?? throw new InvalidOperationException("The store's Satora wallet is not set up.");
 
         public async Task<SatoraModel> GetStoreData(string storeId)
         {
             try
             {
+                var status = await walletService.GetStatusAsync(storeId);
                 await using var _context = pluginDbContextFactory.CreateContext();
-                var settings = await _context.SatoraSettings.FirstOrDefaultAsync(a => a.StoreId == storeId);
-                if (settings == null)
-                {
-                    settings = new SatoraSettings
-                    {
-                        StoreId = storeId,
-                        Enabled = false
-                    };
-                }
-
                 var txs = await _context.SatoraTransactions
                     .Where(a => a.StoreId == storeId)
                     .OrderByDescending(a => a.DateT)
                     .ToListAsync();
 
-                ArkadeBalance walletBalance = null;
-                if (!string.IsNullOrEmpty(settings.Seed))
-                    walletBalance = await satoraService.GetArkadeBalanceAsync(settings.Seed);
-
-                return new SatoraModel { Settings = settings, Transactions = txs, WalletBalance = walletBalance };
+                return new SatoraModel
+                {
+                    StoreId = storeId,
+                    Enabled = status.Enabled,
+                    WalletState = status.State,
+                    NetworkError = walletService.NetworkError,
+                    Transactions = txs
+                };
             }
             catch (Exception e)
             {
                 logger.LogError(e, "SatoraPlugin:GetStoreData()");
-                throw;
-            }
-        }
-
-        public async Task UpdateSettings(SatoraSettings settings)
-        {
-            try
-            {
-                if (settings.Seed == null)
-                    settings.Seed = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
-
-                await using var _context = pluginDbContextFactory.CreateContext();
-                var dbSettings = await _context.SatoraSettings.FirstOrDefaultAsync(a => a.StoreId == settings.StoreId);
-                if (dbSettings == null)
-                    _context.SatoraSettings.Add(settings);
-                else
-                {
-                    dbSettings.Enabled = settings.Enabled;
-                    dbSettings.Seed    = settings.Seed;
-                    _context.SatoraSettings.Update(dbSettings);
-                }
-                await _context.SaveChangesAsync();
-            }
-            catch (Exception e)
-            {
-                logger.LogError(e, "SatoraPlugin:UpdateSettings()");
                 throw;
             }
         }
@@ -112,14 +69,13 @@ namespace BTCPayServer.Plugins.Satora.Services
             }
         }
 
-        public async Task<string?> GetSeedPhraseBySwapId(string swapId)
+        public async Task<string?> GetSeedPhraseBySwapId(string storeId, string swapId)
         {
             try
             {
                 await using var _context = pluginDbContextFactory.CreateContext();
-                var dbSwap    = await _context.SatoraTransactions.FirstOrDefaultAsync(s => s.TxID == swapId);
-                var settings  = await _context.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == dbSwap.StoreId);
-                return settings?.Seed;
+                var dbSwap = await _context.SatoraTransactions.FirstOrDefaultAsync(s => s.TxID == swapId && s.StoreId == storeId);
+                return dbSwap is null ? null : (await walletService.GetStatusAsync(storeId)).Mnemonic;
             }
             catch (Exception e)
             {
@@ -128,14 +84,14 @@ namespace BTCPayServer.Plugins.Satora.Services
             }
         }
 
-        public async Task<string> DoGetSwapStatus(string swapId)
+        public async Task<string> DoGetSwapStatus(string storeId, string swapId)
         {
             try
             {
                 await using var _context = pluginDbContextFactory.CreateContext();
-                var dbSwap      = await _context.SatoraTransactions.FirstOrDefaultAsync(s => s.TxID == swapId);
-                var storeSettings = await _context.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == dbSwap.StoreId);
-                var status      = await satoraService.GetSwapInfoAsync(swapId, storeSettings.Seed);
+                var dbSwap      = await _context.SatoraTransactions.FirstOrDefaultAsync(s => s.TxID == swapId && s.StoreId == storeId)
+                                  ?? throw new InvalidOperationException("Swap not found.");
+                var status      = await satoraService.GetSwapInfoAsync(swapId, await RequireSeedAsync(storeId));
                 if (dbSwap.Status != status)
                 {
                     dbSwap.Status = status;
@@ -151,18 +107,19 @@ namespace BTCPayServer.Plugins.Satora.Services
             }
         }
 
-        public async Task<SwapDetailsModel> GetSwapDetailsAsync(string storeId, string swapId)
+        public async Task<SwapDetailsModel?> GetSwapDetailsAsync(string storeId, string swapId)
         {
             var model = new SwapDetailsModel { StoreId = storeId };
 
             await using var _context = pluginDbContextFactory.CreateContext();
-            var storeSettings = await _context.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == storeId);
             model.LocalTx = await _context.SatoraTransactions
                 .FirstOrDefaultAsync(s => s.TxID == swapId && s.StoreId == storeId);
+            if (model.LocalTx is null)
+                return null;
 
             try
             {
-                var swap = await satoraService.GetSwapAsync(swapId, storeSettings.Seed);
+                var swap = await satoraService.GetSwapAsync(swapId, await RequireSeedAsync(storeId));
                 model.BackendStatus  = swap.Status.GetType().Name;
                 model.DepositAddress = (swap.Funding as SwapFunding.Gasless)?.@depositAddress;
                 model.DepositAmount  = swap.DepositAmount;
@@ -187,9 +144,9 @@ namespace BTCPayServer.Plugins.Satora.Services
             {
                 await using var _context = pluginDbContextFactory.CreateContext();
                 var dbSwap        = await _context.SatoraTransactions.FirstOrDefaultAsync(s => s.TxID == swapId);
-                var storeSettings = await _context.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == dbSwap.StoreId);
+                var seed          = await RequireSeedAsync(dbSwap.StoreId);
 
-                var swap            = await satoraService.GetSwapAsync(swapId, storeSettings.Seed);
+                var swap            = await satoraService.GetSwapAsync(swapId, seed);
                 var statusName      = swap.Status.GetType().Name;
                 var originalClaimTxId = dbSwap?.ClaimTxId;
                 var originalSweepTxId = dbSwap?.SweepTxId;
@@ -198,16 +155,16 @@ namespace BTCPayServer.Plugins.Satora.Services
                 switch (swap.Status)
                 {
                     case SwapStatus.Pending:
-                        var deposit = await satoraService.CheckDepositAsync(swapId, storeSettings.Seed);
+                        var deposit = await satoraService.CheckDepositAsync(swapId, seed);
                         if (!deposit.HasSufficientSourceToken)
                         {
                             action = $"waiting_for_deposit ({deposit.SourceTokenBalance}/{deposit.SourceTokenRequired})";
                             break;
                         }
-                        var fundReceipt = await satoraService.FundSwapAsync(swapId, storeSettings.Seed);
+                        var fundReceipt = await satoraService.FundSwapAsync(swapId, seed);
                         logger.LogInformation("SatoraPlugin:ContinueSwap({SwapId}): funded, userOpHash={Hash}", swapId, fundReceipt.UserOpHash);
                         action     = $"funded:{fundReceipt.UserOpHash}";
-                        swap       = await satoraService.GetSwapAsync(swapId, storeSettings.Seed);
+                        swap       = await satoraService.GetSwapAsync(swapId, seed);
                         statusName = swap.Status.GetType().Name;
                         break;
 
@@ -251,7 +208,7 @@ namespace BTCPayServer.Plugins.Satora.Services
                             }
                         }
 
-                        swap = await satoraService.GetSwapAsync(swapId, storeSettings.Seed);
+                        swap = await satoraService.GetSwapAsync(swapId, seed);
                         statusName = swap.Status.GetType().Name;
                         break;
 

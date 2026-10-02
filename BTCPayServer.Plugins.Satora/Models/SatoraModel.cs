@@ -1,14 +1,18 @@
 
-using uniffi.satora_sdk_ffi;
-
 namespace BTCPayServer.Plugins.Satora.Models
 {
     public class SatoraModel
     {
-        public SatoraSettings Settings { get; set; }
+        public string StoreId { get; set; } = null!;
 
-        public List<SatoraTx> Transactions { get; set; }
+        public bool Enabled { get; set; }
 
-        public ArkadeBalance? WalletBalance { get; set; }
+        public SatoraWalletState WalletState { get; set; }
+
+        public bool CanUseHotWallet { get; set; }
+
+        public string? NetworkError { get; set; }
+
+        public List<SatoraTx> Transactions { get; set; } = new();
     }
 }

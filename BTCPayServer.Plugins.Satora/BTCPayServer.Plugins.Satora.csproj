@@ -9,7 +9,7 @@
   <!-- Plugin specific properties -->
   <PropertyGroup>
     <Product>Satora</Product>
-    <Description>Gives each store its own wallet on Arkade.</Description>
+    <Description>Gives each store its own Satora wallet.</Description>
     <Version>0.1.1</Version>
   </PropertyGroup>
 
