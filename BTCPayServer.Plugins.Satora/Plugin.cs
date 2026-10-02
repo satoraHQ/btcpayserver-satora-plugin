@@ -1,7 +1,9 @@
 using System.Runtime.CompilerServices;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Lightning;
 using BTCPayServer.Plugins.Satora.Data;
+using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Services;
 
 [assembly: InternalsVisibleTo("BTCPayServer.Plugins.Satora.Tests")]
@@ -23,11 +25,21 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddHostedService<PluginMigrationRunner>()
                 .AddSingleton<SatoraSeedProtector>()
                 .AddSingleton<SatoraNotifier>()
+                .AddSingleton<SatoraSentAlerts>()
                 .AddSingleton<SatoraWalletRegistry>()
                 // After PluginMigrationRunner, so the tables exist when it prepares the enabled wallets.
                 .AddSingleton<IHostedService>(s => s.GetRequiredService<SatoraWalletRegistry>())
                 .AddSingleton<SatoraWalletService>()
                 .AddSingleton<INotificationHandler, SatoraWalletLockedNotification.Handler>()
+                .AddSingleton(s => new SatoraClaimWindow(s.GetRequiredService<SatoraWalletRegistry>().Network))
+                .AddSingleton<SatoraLightningSwaps>()
+                .AddSingleton<SatoraLightningWallets>()
+                .AddSingleton<SatoraLightningInvoiceHub>()
+                .AddSingleton<SatoraLightningCredit>()
+                .AddSingleton<SatoraStoreLightningConfig>()
+                .AddSingleton<ILightningConnectionStringHandler, SatoraLightningConnectionStringHandler>()
+                .AddHostedService<SatoraLightningWorker>()
+                .AddSingleton<INotificationHandler, SatoraLightningNotification.Handler>()
                 .AddSingleton<SatoraSettlementService>()
                 .AddSingleton<SatoraService>()
                 .AddSingleton<SatoraPluginService>();

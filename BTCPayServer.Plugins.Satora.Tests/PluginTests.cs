@@ -1,5 +1,7 @@
 using BTCPayServer.Abstractions.Contracts;
+using BTCPayServer.Lightning;
 using BTCPayServer.Plugins.Satora.Controllers;
+using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Services;
 using Microsoft.AspNetCore.Mvc.ApplicationParts;
 using Microsoft.AspNetCore.Mvc.Controllers;
@@ -48,6 +50,19 @@ public class PluginTests
         Assert.DoesNotContain(extensions, e => e.Location.StartsWith("checkout", StringComparison.Ordinal));
         Assert.Contains(typeof(PluginMigrationRunner), hostedServices);
         Assert.DoesNotContain(typeof(SatoraSwapWatcher), hostedServices);
+    }
+
+    [Fact]
+    public void RegistersTheWalletAsALightningNodeWithItsWorker()
+    {
+        var services = new ServiceCollection();
+        new Plugin().Execute(services);
+
+        Assert.Contains(services, d => d.ServiceType == typeof(ILightningConnectionStringHandler) && d.ImplementationType == typeof(SatoraLightningConnectionStringHandler));
+        Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraLightningWorker));
+        foreach (var dependency in typeof(SatoraLightningWorker).GetConstructors().Single().GetParameters().Select(p => p.ParameterType)
+                     .Where(t => t.Assembly == typeof(Plugin).Assembly))
+            Assert.Contains(services, d => d.ServiceType == dependency);
     }
 
     // BTCPay adds the plugin assembly as an MVC application part, so every public controller in it is routed

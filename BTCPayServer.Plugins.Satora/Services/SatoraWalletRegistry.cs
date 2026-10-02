@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using BTCPayServer.Configuration;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Models;
@@ -17,7 +19,9 @@ public sealed class SatoraWalletRegistry : IHostedService, IDisposable
     // Stores whose wallet is being replaced or evicted. GetAsync waits for the task.
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _exclusive = new();
     private readonly ConcurrentDictionary<string, bool> _lockNotified = new();
+    private readonly ConcurrentDictionary<string, string> _lightningKeys = new();
     private readonly ConcurrentDictionary<Task, bool> _warmUps = new();
+    private volatile Task _lightningKeysLoaded;
     private volatile bool _disposed;
     private readonly SatoraPluginDbContextFactory _dbContextFactory;
     private readonly SatoraSeedProtector _seedProtector;
@@ -54,6 +58,9 @@ public sealed class SatoraWalletRegistry : IHostedService, IDisposable
         {
             NetworkError = e.Message;
         }
+        // BTCPay builds this registry, through the Lightning connection string handler, before any
+        // hosted service starts, so its LightningListener finds the keys when it first connects.
+        _lightningKeysLoaded = Task.Run(LoadLightningKeysAsync);
     }
 
     public SatoraBitcoinNetwork? Network { get; }
@@ -223,15 +230,51 @@ public sealed class SatoraWalletRegistry : IHostedService, IDisposable
         }
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    // Whether key is the store's Lightning connection key. BTCPay creates Lightning clients
+    // synchronously, so the keys are kept in memory.
+    public bool IsLightningKey(string storeId, string key)
     {
+        if (!_lightningKeysLoaded.IsCompleted)
+            _lightningKeysLoaded.Wait(TimeSpan.FromSeconds(10));
+        return _lightningKeys.TryGetValue(storeId, out var expected) &&
+               CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(key));
+    }
+
+    public void SetLightningKey(string storeId, string key) => _lightningKeys[storeId] = key;
+
+    // Before the plugin's migrations have run the table may not exist yet; StartAsync loads again after them.
+    private async Task LoadLightningKeysAsync()
+    {
+        try
+        {
+            List<(string StoreId, string Key)> keys;
+            await using (var ctx = _dbContextFactory.CreateContext())
+                keys = (await ctx.SatoraSettings
+                        .Where(s => s.LightningConnectionKey != null)
+                        .Select(s => new { s.StoreId, s.LightningConnectionKey })
+                        .ToListAsync())
+                    .Select(s => (s.StoreId, s.LightningConnectionKey!))
+                    .ToList();
+            // A key set while this ran is newer than the one read.
+            foreach (var (storeId, key) in keys)
+                _lightningKeys.TryAdd(storeId, key);
+        }
+        catch (Exception e)
+        {
+            _logger.LogDebug(e, "Could not load the Satora Lightning connection keys yet");
+        }
+    }
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        _lightningKeysLoaded = LoadLightningKeysAsync();
+        await _lightningKeysLoaded;
         if (NetworkError is not null)
         {
             _logger.LogWarning("Satora wallets are unavailable: {Reason}", NetworkError);
-            return Task.CompletedTask;
+            return;
         }
         _ = Task.Run(WarmEnabledStores, CancellationToken.None);
-        return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
@@ -340,6 +383,9 @@ public sealed class StoreWallet : IDisposable
 
     public async Task<string> GetArkadeAddressAsync(CancellationToken cancellationToken = default) =>
         _arkadeAddress ??= await Client.GetArkadeAddressAsync(cancellationToken);
+
+    public async Task<string> RefreshArkadeAddressAsync(CancellationToken cancellationToken = default) =>
+        _arkadeAddress = await Client.GetArkadeAddressAsync(cancellationToken);
 
     internal void Retire()
     {

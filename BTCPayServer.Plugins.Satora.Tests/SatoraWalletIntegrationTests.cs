@@ -122,6 +122,10 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
         Assert.Equal(SatoraMnemonic.Fingerprint(phrase!), now.SeedFingerprint);
         Assert.NotEqual(old.LightningConnectionKey, now.LightningConnectionKey);
         Assert.Equal(64, now.LightningConnectionKey?.Length);
+        Assert.False(registry.IsLightningKey("replace", old.LightningConnectionKey!));
+        Assert.True(registry.IsLightningKey("replace", now.LightningConnectionKey!));
+        // The new wallet starts disabled, so the store's BTC-LN config stops using this wallet.
+        Assert.Equal((false, now.LightningConnectionKey), db.LightningConfig.Calls("replace").Last());
         var retired = Assert.Single(await db.Retired("replace"));
         Assert.Equal((SatoraRetiredSeed.DataProtectionFormat, old.ProtectedSeed, old.SeedFingerprint),
             (retired.Format, retired.Ciphertext, retired.SeedFingerprint));
@@ -503,6 +507,12 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
 
         public string DataDir => Path.Combine(_scratch, "data");
 
+        public SatoraPluginDbContextFactory Contexts => _contexts;
+
+        public RecordingLightningConfig LightningConfig { get; } = new();
+
+        public FakeLightningInvoices LightningInvoices { get; } = new();
+
         private string ConnectionString => new NpgsqlConnectionStringBuilder(Server) { Database = _name }.ConnectionString;
 
         public async ValueTask InitializeAsync()
@@ -565,7 +575,8 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
             var registry = new SatoraWalletRegistry(_contexts, protector, null!, _networks, configuration,
                 Options.Create(new DataDirectories { DataDir = DataDir }), registryLogger ?? NullLogger<SatoraWalletRegistry>.Instance);
             _registries.Add(registry);
-            return (registry, new SatoraWalletService(_contexts, protector, registry, logger ?? NullLogger<SatoraWalletService>.Instance));
+            return (registry, new SatoraWalletService(_contexts, protector, registry, LightningConfig,
+                LightningInvoices, logger ?? NullLogger<SatoraWalletService>.Instance));
         }
 
         public async Task<SatoraSettings> Settings(string storeId)

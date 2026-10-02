@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using BTCPayServer.Plugins.Satora.Data;
+using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
 using Microsoft.EntityFrameworkCore;
 using ArkadeBalance = uniffi.satora_sdk_ffi.ArkadeBalance;
@@ -11,6 +12,8 @@ public class SatoraWalletService(
     SatoraPluginDbContextFactory dbContextFactory,
     SatoraSeedProtector seedProtector,
     SatoraWalletRegistry registry,
+    SatoraStoreLightningConfig lightningConfig,
+    SatoraLightningCredit lightningInvoices,
     ILogger<SatoraWalletService> logger)
 {
     private static readonly TimeSpan BalanceTimeout = TimeSpan.FromSeconds(20);
@@ -92,6 +95,7 @@ public class SatoraWalletService(
                 registry.Warm(storeId);
             else
                 await registry.EvictAsync(storeId, async () => await CountOpenOperationsAsync(storeId) == 0);
+            await lightningConfig.SyncAsync(storeId, enabled, settings.LightningConnectionKey);
             return true;
         }
         finally
@@ -115,6 +119,50 @@ public class SatoraWalletService(
         return await TryReadBalanceAsync(wallet);
     }
 
+    // A new key stops every copy of the store's Lightning connection string working; the store's own
+    // BTC-LN config, if it uses this wallet, is rewritten with the new key.
+    public async Task<bool> RotateLightningKeyAsync(string storeId)
+    {
+        var walletLock = WalletLock(storeId);
+        await walletLock.WaitAsync();
+        try
+        {
+            await using var ctx = dbContextFactory.CreateContext();
+            var settings = await ctx.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == storeId);
+            if (settings?.LightningConnectionKey is null)
+                return false;
+            settings.LightningConnectionKey = NewConnectionKey();
+            await ctx.SaveChangesAsync();
+            registry.SetLightningKey(storeId, settings.LightningConnectionKey);
+            await lightningConfig.SyncAsync(storeId, settings.Enabled, settings.LightningConnectionKey);
+            return true;
+        }
+        finally
+        {
+            walletLock.Release();
+        }
+    }
+
+    // The owner's explicit choice to put the wallet in place of a Lightning node the store already uses.
+    public virtual async Task<bool> UseAsLightningNodeAsync(string storeId)
+    {
+        var walletLock = WalletLock(storeId);
+        await walletLock.WaitAsync();
+        try
+        {
+            await using var ctx = dbContextFactory.CreateContext();
+            var settings = await ctx.SatoraSettings.AsNoTracking().FirstOrDefaultAsync(s => s.StoreId == storeId);
+            if (settings is not { Enabled: true, LightningConnectionKey: { } key } || seedProtector.Read(settings).State != SatoraWalletState.Ready)
+                return false;
+            await lightningConfig.SyncAsync(storeId, true, key, replace: true);
+            return true;
+        }
+        finally
+        {
+            walletLock.Release();
+        }
+    }
+
     // Swaps (and, once they exist, withdrawals in an unknown state) that still need the store's
     // current seed. Every table that holds such rows adds its count here. Rows from before the
     // current seed was created belong to a seed it replaced: a replace needs none of them open. A
@@ -123,10 +171,12 @@ public class SatoraWalletService(
     {
         await using var ctx = dbContextFactory.CreateContext();
         var open = await OpenOperationsAsync(ctx, storeId);
-        return await open.Swaps.CountAsync();
+        return await open.Swaps.CountAsync() + await open.LightningSwaps.CountAsync();
     }
 
-    // What CountOpenOperationsAsync counts, for the store to find, by id. A store can have many, so
+    // What CountOpenOperationsAsync counts, for the store to find: swaps that pay an invoice by their
+    // invoice, which BTCPay can search, and the rest by id. Incoming Lightning swaps keep no invoice
+    // id, so theirs is looked up by payment hash. A store taking payments all day can have many, so
     // only the first few of each kind are named.
     public async Task<string> DescribeOpenOperationsAsync(string storeId)
     {
@@ -134,6 +184,13 @@ public class SatoraWalletService(
         await using var ctx = dbContextFactory.CreateContext();
         var open = await OpenOperationsAsync(ctx, storeId);
         var parts = new List<string>();
+        var lightning = await open.LightningSwaps.OrderBy(s => s.CreatedAt).Select(s => new { s.SwapId, s.PaymentHash, s.Direction }).ToListAsync();
+        var incoming = lightning.Where(s => s.Direction == SatoraLightningDirection.LightningToArkade).ToList();
+        var invoices = await lightningInvoices.FindInvoiceIdsAsync(incoming.Select(s => s.PaymentHash).ToList());
+        Add("Lightning swaps of invoices",
+            incoming.Select(s => invoices.GetValueOrDefault(s.PaymentHash)).OfType<string>().ToList());
+        Add("Lightning swaps BTCPay has no invoice for",
+            incoming.Where(s => !invoices.ContainsKey(s.PaymentHash)).Select(s => s.SwapId).ToList());
         Add("swaps of an earlier plugin version", await open.Swaps.OrderBy(t => t.DateT).Select(t => t.TxID).ToListAsync());
         return string.Join("; ", parts);
 
@@ -146,7 +203,8 @@ public class SatoraWalletService(
     }
 
     private sealed record OpenOperations(
-        IQueryable<SatoraTx> Swaps);
+        IQueryable<SatoraTx> Swaps,
+        IQueryable<SatoraLightningSwap> LightningSwaps);
 
     private static async Task<OpenOperations> OpenOperationsAsync(SatoraPluginDbContext ctx, string storeId)
     {
@@ -156,12 +214,14 @@ public class SatoraWalletService(
             .FirstOrDefaultAsync();
         var swaps = ctx.SatoraTransactions.Where(t =>
             t.StoreId == storeId && (t.Status == null || !SeedWriteGuard.SeedNotNeededStatuses.Contains(t.Status)));
+        var lightningSwaps = ctx.SatoraLightningSwaps.Where(s => s.StoreId == storeId && s.CompletedAt == null);
         if (walletCreated is { } created)
         {
             var since = created.UtcDateTime;
             swaps = swaps.Where(t => t.DateT >= since);
+            lightningSwaps = lightningSwaps.Where(s => s.CreatedAt >= created);
         }
-        return new OpenOperations(swaps);
+        return new OpenOperations(swaps, lightningSwaps);
     }
 
     private async Task<SeedWriteRefusal> WriteSeedAsync(string storeId, string mnemonic, SeedWriteKind kind, string? confirmation)
@@ -208,6 +268,7 @@ public class SatoraWalletService(
                     settings.LightningConnectionKey = NewConnectionKey();
                 }
                 await ctx.SaveChangesAsync();
+                registry.SetLightningKey(storeId, settings.LightningConnectionKey);
             }
 
             if (!SeedWriteGuard.IsReplace(current.State, kind, sameWallet))
@@ -220,11 +281,12 @@ public class SatoraWalletService(
                 await SaveAsync();
                 if (settings!.Enabled)
                     registry.Warm(storeId);
+                await lightningConfig.SyncAsync(storeId, settings.Enabled, settings.LightningConnectionKey);
                 return SeedWriteRefusal.None;
             }
             // Counted inside the registry's gate, so no swap can be created from the old wallet after
             // the count and be stranded by the replace.
-            return await registry.ReplaceAsync(storeId, async wallet =>
+            var replaced = await registry.ReplaceAsync(storeId, async wallet =>
             {
                 var refusal = SeedWriteGuard.Check(
                     current.State,
@@ -238,6 +300,10 @@ public class SatoraWalletService(
                 await SaveAsync();
                 return (SeedWriteRefusal.None, true);
             });
+            // A replaced wallet starts disabled, so a BTC-LN config that used it is removed.
+            if (replaced == SeedWriteRefusal.None)
+                await lightningConfig.SyncAsync(storeId, settings!.Enabled, settings.LightningConnectionKey);
+            return replaced;
         }
         finally
         {

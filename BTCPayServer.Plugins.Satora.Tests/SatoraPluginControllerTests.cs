@@ -72,8 +72,26 @@ public class SatoraPluginControllerTests
         Assert.IsType<NotFoundResult>(await controller.RestoreWallet("store", new SatoraRestoreWalletViewModel()));
         Assert.IsType<NotFoundResult>(await controller.ConfirmBackup("store", new SatoraConfirmBackupViewModel()));
         Assert.IsType<NotFoundResult>(await controller.ViewSeed("store"));
+        Assert.IsType<NotFoundResult>(await controller.RotateLightningKey("store"));
+        Assert.IsType<NotFoundResult>(await controller.UseAsLightningNode("store", new SatoraUseAsLightningNodeViewModel { ReplaceConfirmation = SeedWriteGuard.ConfirmationWord }));
         Assert.IsType<NotFoundResult>(await controller.Index("store", new SatoraSettingsViewModel { Enabled = true }));
         Assert.Empty(wallets.StatusReads);
+        Assert.Empty(wallets.LightningNodeReplaces);
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("replace", false)]
+    [InlineData(SeedWriteGuard.ConfirmationWord, true)]
+    public async Task ReplacingTheStoresLightningNodeNeedsTheConfirmationWord(string? confirmation, bool replaced)
+    {
+        var wallets = new RecordingWalletService();
+        var controller = Controller(admin: true, allowHotWalletForAll: false, wallets);
+
+        var result = await controller.UseAsLightningNode("store", new SatoraUseAsLightningNodeViewModel { ReplaceConfirmation = confirmation });
+
+        Assert.Equal(nameof(SatoraPluginController.Index), Assert.IsType<RedirectToActionResult>(result).ActionName);
+        Assert.Equal(replaced ? ["store"] : [], wallets.LightningNodeReplaces);
     }
 
     [Theory]
@@ -105,14 +123,22 @@ public class SatoraPluginControllerTests
     }
 
     // A wallet whose seed cannot be read, so ViewSeed redirects back to the settings page.
-    private sealed class RecordingWalletService() : SatoraWalletService(null!, null!, null!, NullLogger<SatoraWalletService>.Instance)
+    private sealed class RecordingWalletService() : SatoraWalletService(null!, null!, null!, null!, null!, NullLogger<SatoraWalletService>.Instance)
     {
         public List<string> StatusReads { get; } = [];
+
+        public List<string> LightningNodeReplaces { get; } = [];
 
         public override Task<SatoraWalletStatus> GetStatusAsync(string storeId)
         {
             StatusReads.Add(storeId);
             return Task.FromResult(new SatoraWalletStatus(SatoraWalletState.Locked, null, false));
+        }
+
+        public override Task<bool> UseAsLightningNodeAsync(string storeId)
+        {
+            LightningNodeReplaces.Add(storeId);
+            return Task.FromResult(true);
         }
     }
 
