@@ -1,0 +1,115 @@
+@using System.Globalization
+@using BTCPayServer.Abstractions.Extensions
+@using BTCPayServer.Abstractions.Models
+@using BTCPayServer.Plugins.Satora.Chain
+@using BTCPayServer.Plugins.Satora.Views
+
+@model BTCPayServer.Plugins.Satora.Models.SatoraChainRefundPageModel
+@{
+    ViewData.SetLayoutModel(new LayoutModel(nameof(PluginNavPages.Index), "Satora on-chain refunds")
+    { ActiveCategory = nameof(PluginNavPages) });
+    string At(DateTimeOffset time) => time.ToString("u", CultureInfo.InvariantCulture);
+    string Btc(long sats) => (sats / 100_000_000m).ToString("0.00000000", CultureInfo.InvariantCulture) + " BTC";
+}
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <h2 class="mb-0">On-chain refunds</h2>
+    <a asp-controller="SatoraPlugin" asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">Back to Satora</a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<p>
+    These on-chain payments did not count toward their invoice. To refund one, ask the customer for a Bitcoin address and enter it below.
+    A refund can go out from about a day after the swap was created, and its network fee comes out of the refund.
+    An amount smaller than the network fee is refunded only if fees fall within a day.
+    <a href="https://github.com/satoraHQ/btcpayserver-satora-plugin#refunds" target="_blank" rel="noreferrer noopener">How refunds work</a>
+</p>
+
+@if (!Model.Swaps.Any())
+{
+    <p><i>No on-chain payment needs a refund.</i></p>
+}
+@foreach (var swap in Model.Swaps)
+{
+    <div class="border rounded p-3 mb-3">
+        <div class="d-flex flex-wrap gap-4 mb-2">
+            <div><span class="text-secondary">Swap</span> <code>@swap.SwapId</code></div>
+            <div>
+                <span class="text-secondary">Invoice</span>
+                <a asp-controller="UIInvoice" asp-action="Invoice" asp-route-invoiceId="@swap.InvoiceId">@swap.InvoiceId</a>
+            </div>
+            <div><span class="text-secondary">Why</span> @SatoraChainRefunds.Describe(swap.NeedsRefundReason)</div>
+            <div><span class="text-secondary">Expected deposit</span> @Btc(swap.DepositSats)</div>
+            @if (swap.RefundTxId is null)
+            {
+                <div>
+                    <span class="text-secondary">Unspent at the address</span>
+                    @if (Model.Outputs.GetValueOrDefault(swap.SwapId) is { } outputs)
+                    {
+                        @Btc(outputs.Sum(o => o.ValueSats))
+                        @if (outputs.Any(o => !o.Confirmed))
+                        {
+                            <span class="text-secondary">(not all confirmed)</span>
+                        }
+                    }
+                    else
+                    {
+                        <i>could not be read</i>
+                    }
+                </div>
+            }
+        </div>
+        <div class="text-break mb-2"><span class="text-secondary">Swap address</span> <code>@swap.HtlcAddress</code></div>
+        <div class="mb-2">
+            <span class="text-secondary">Refund from about</span> @At(swap.BtcRefundLocktime)
+            @if (Model.Now >= swap.BtcRefundLocktime)
+            {
+                <span class="badge bg-success ms-2">now</span>
+            }
+            <div class="form-text">The refund usually goes out within two hours of this time.</div>
+        </div>
+        @if (swap.RefundTxId is not null)
+        {
+            <div class="alert alert-info mb-2">Refunded to <code>@swap.RefundAddress</code> in <code>@swap.RefundTxId</code>. The swap stays listed until the refund confirms.</div>
+        }
+        else if (swap.RefundAttempted)
+        {
+            <div class="alert alert-info mb-2">Sending the refund to <code>@swap.RefundAddress</code>. Failed attempts are retried automatically.</div>
+        }
+        else
+        {
+            @if (swap.RefundAddress is not null)
+            {
+                <div class="mb-2">Refund requested to <code>@swap.RefundAddress</code>. The address can be changed until about @At(swap.BtcRefundLocktime).</div>
+            }
+            <form method="post" asp-action="RequestRefund" asp-route-storeId="@Model.StoreId" asp-route-swapId="@swap.SwapId" class="d-flex flex-wrap gap-2 align-items-end">
+                <div class="flex-grow-1">
+                    <label for="Address@(swap.SwapId)" class="form-label">Customer's Bitcoin address</label>
+                    <input id="Address@(swap.SwapId)" name="Address" class="form-control font-monospace" autocomplete="off" spellcheck="false" />
+                </div>
+                <div>
+                    <label for="Confirmation@(swap.SwapId)" class="form-label">Type @SatoraChainRefunds.ConfirmationWord</label>
+                    <input id="Confirmation@(swap.SwapId)" name="Confirmation" class="form-control" autocomplete="off" />
+                </div>
+                <button type="submit" class="btn btn-primary">Refund</button>
+            </form>
+        }
+        <details class="mt-3">
+            <summary class="text-secondary">Dismiss without refunding</summary>
+            <form method="post" asp-action="Dismiss" asp-route-storeId="@Model.StoreId" asp-route-swapId="@swap.SwapId" class="d-flex flex-wrap gap-2 align-items-end mt-2">
+                <div>
+                    <label for="Dismiss@(swap.SwapId)" class="form-label">Type @SatoraChainRefunds.DismissWord</label>
+                    <input id="Dismiss@(swap.SwapId)" name="Confirmation" class="form-control" autocomplete="off" />
+                </div>
+                <button type="submit" class="btn btn-outline-danger">Dismiss</button>
+            </form>
+            <div class="form-text">
+                Dismiss only if the customer was paid back another way, or the amount is not worth refunding.
+                @(swap.RefundTxId is not null ? "Nothing more is sent from the swap address. The refund already sent can still confirm."
+                    : swap.RefundAttempted ? "Nothing more is sent from the swap address. An earlier refund attempt may still confirm."
+                    : "The bitcoin at the swap address is never sent back.")
+            </div>
+        </details>
+    </div>
+}

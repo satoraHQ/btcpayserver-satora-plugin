@@ -1,6 +1,7 @@
 using System.Globalization;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Configuration;
+using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Services.Notifications;
 
@@ -86,7 +87,7 @@ public class SatoraLightningNotification : BaseNotification
             Problems.RefundWithoutServerFailing =>
                 $"Refunding Lightning payment {notification.SwapId} to the Satora wallet without the swap server keeps failing. {Held(notification)}",
             Problems.RefundLocktimeNotMature =>
-                $"Refunding Lightning payment {notification.SwapId} to the Satora wallet without the swap server is still refused {SatoraOutgoingActions.MedianTimeLag.TotalHours:0} hours after its refund locktime, {cutoff}. Check that the esplora server is reachable and in sync. {Held(notification)}",
+                $"Refunding Lightning payment {notification.SwapId} to the Satora wallet without the swap server is still refused {SatoraChainActions.MedianTimeLag.TotalHours:0} hours after its refund locktime, {cutoff}. Check that the esplora server is reachable and in sync. {Held(notification)}",
             Problems.FundingFailing when InRefundState(notification) =>
                 $"Funding Lightning payment {notification.SwapId} from the Satora wallet keeps failing ({notification.Error}). The swap server has given up on the payment, so BTCPay was told it failed and its payout, if any, is cancelled. An earlier attempt may have funded it, so it stays open until its funds are back in the wallet. If it is still open after its refund locktime, {cutoff}, check the wallet's balance and close it on the withdrawals page.",
             Problems.FundingFailing =>

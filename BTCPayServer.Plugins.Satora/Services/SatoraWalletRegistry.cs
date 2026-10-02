@@ -68,6 +68,9 @@ public sealed class SatoraWalletRegistry : IHostedService, IDisposable
     // Set when BTCPay runs on a network Satora does not support; no wallet can be created then.
     public string? NetworkError { get; }
 
+    // The esplora every store's client reads the chain through.
+    public string? EsploraUrl => Network is { } network ? _endpoints.EsploraUrl ?? SatoraNetworks.DefaultEsploraUrl(network) : null;
+
     public async Task<SatoraWalletStatus> ReadStatusAsync(string storeId)
     {
         SatoraSettings? settings;

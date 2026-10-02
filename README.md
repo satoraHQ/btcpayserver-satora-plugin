@@ -2,16 +2,17 @@
 
 Satora is a [BTCPay Server](https://btcpayserver.org) plugin that gives each
 store its own Satora wallet on [Arkade](https://arkade.money). Customers pay
-into it over Lightning (BTC-LN), and Satora swaps turn each payment into
-bitcoin in the wallet. The wallet also pays BTCPay's Lightning payouts and
-refunds, and the store can withdraw from it to Arkade, Lightning and Bitcoin
-destinations. The store holds its own keys, with no custodian in between.
+into it over Lightning (BTC-LN) or on chain with **Bitcoin (Satora)**
+(`BTC-SATORA-CHAIN`), and Satora swaps turn each payment into bitcoin in the
+wallet. The wallet also pays BTCPay's Lightning payouts and refunds, and the
+store can withdraw from it to Arkade, Lightning and Bitcoin destinations. The
+store holds its own keys, with no custodian in between.
 
 The Satora page, under Wallets in the store's menu, sets up the store's Satora
 wallet, shows its balance and lists earlier swaps (see [Wallet](#wallet)).
-Lightning payments land in the wallet (see [Lightning](#lightning)). The wallet
-pays out over Lightning, to Arkade and on chain (see
-[Withdrawals](#withdrawals)).
+Lightning and on-chain payments land in the wallet (see [Lightning](#lightning)
+and [On-chain payments](#on-chain-payments)). The wallet pays out over
+Lightning, to Arkade and on chain (see [Withdrawals](#withdrawals)).
 
 ## Requirements
 
@@ -153,8 +154,170 @@ For payments out of the wallet it also notifies when:
 An alert about a swap that pays an invoice names the invoice and links to it.
 
 Each alert goes out once per swap, or once per outage for status alerts, and a
-BTCPay restart does not send it again. After a restart, a claim that keeps
-failing is reported again once it has failed twice more.
+BTCPay restart does not send it again. The on-chain alerts below work the same
+way. After a restart, a claim that keeps failing is reported again once it has
+failed twice more.
+
+## On-chain payments
+
+Enabling the wallet also adds **Bitcoin (Satora)** (`BTC-SATORA-CHAIN`) to
+checkout. It is a payment method of its own and never touches the store's
+on-chain wallet. Disabling or replacing the Satora wallet removes it. Each
+payment is a Bitcoin to Arkade swap. The customer sends one transaction to the
+swap's address, the swap server funds an Arkade VHTLC after one confirmation,
+and the wallet claims it. The wallet receives exactly the amount due. The
+customer pays the swap fee on top, which checkout shows as the network cost.
+
+- Turn on lazy payment methods in the store's checkout settings ("Only enable
+  the payment method after user explicitly chooses it"). Without it every
+  invoice creates a swap whether or not the customer pays on chain, and each
+  one stays open on the swap server and in the plugin until it expires about
+  12 hours later.
+- Checkout offers this method only for amounts the swap server takes. The
+  server sets a minimum for the route, tens of thousands of sats on mainnet
+  (its `/swap-pairs` lists the current one), and needs liquidity for the
+  amount. The method is also left out when the swap fee would be more than 3%
+  of the amount due plus 2,000 sats.
+- On mainnet, keep invoice expiry under about 9 hours 55 minutes. A longer
+  invoice is offered without this method and creates no swap. The wallet can
+  claim until 12 hours after the swap was created, by the chain's median time
+  past, less a 5 minute margin, and the swap server funds nothing after that.
+  An invoice has to expire at least 2 hours before that deadline (5 minutes off
+  mainnet), so that a payment made just before expiry can still confirm. A
+  payment the swap server has not funded by the deadline, seen or confirmed,
+  goes back to the customer. A claim already started is still finished after
+  the deadline. Once the swap server can take the VHTLC back, the SDK is asked
+  whether a claim can still complete. If one can, the claim continues and the
+  payment is never refunded. If none can, the payment goes back to the
+  customer.
+- The customer has to pay at least the amount shown in a single output. Smaller
+  payments do not add up. Once such an output is seen, in the mempool or
+  confirmed, the invoice is processing. It settles once the wallet holds the
+  claim's receipt, after one confirmation. If an unconfirmed output disappears,
+  because a fee bump paid elsewhere or it was dropped, the payment comes off
+  the invoice again. A payment after the invoice expires is recorded as paid
+  late. A claim the swap server reports but the wallet has no receipt for never
+  settles the invoice.
+- An output larger than the amount shown still pays the invoice, but the swap
+  server keeps the excess. The invoice does not show as overpaid. Once the
+  wallet has claimed the swap, the invoice's Events note the excess and BTCPay
+  notifies the store, so it can settle with the customer. Neither happens
+  before the claim, while the payment can still be replaced or refunded.
+- After a partial payment through another method, the prompt gets a new swap
+  for what is left, the way BTCPay renews a Lightning invoice. The same happens
+  when a payment taken off the invoice changes the amount due. Checkout shows
+  no address while the swap's amount differs from the amount due. If the swap
+  server refuses the new swap, or the prompt's swap fails or expires while the
+  invoice is open, the method is turned off for the invoice. BTCPay then makes
+  a new swap when the customer picks the method again, or leaves it out. A
+  payment to an old address is credited or refunded as below, and an expired
+  swap's address is watched until an hour after the invoice expires. If the
+  wallet claims a payment after the invoice's other payments paid it in full,
+  the invoice's Events note it and BTCPay notifies the store, as BTCPay does
+  not show a settled invoice as overpaid. Neither happens before the claim,
+  while the payment can still be replaced or refunded.
+
+### Refunds
+
+These payments go back to the customer:
+
+- an underpayment
+- a payment the swap server refuses after its sanctions screening
+- a payment still unconfirmed at the claim deadline
+- a payment whose VHTLC the server took back because it was not claimed in time
+- a funded swap no claim can complete once the server can take its VHTLC back
+- bitcoin sent to a swap's address after the swap ended.
+
+A payment that was on the invoice comes off it, and BTCPay marks it
+unaccounted, as for a replaced transaction. An underpayment, or bitcoin sent
+after the swap ended, never counted toward the invoice. BTCPay notifies the
+store, and the swap is listed on the **On-chain refunds** page with what sits
+unspent at its address. The invoice's Events note that it needs a refund, when
+the refund is broadcast and when the swap closes.
+
+If the swap server reports that it swept the deposit but the output is still at
+the address, the swap is listed only if the output is still there ten minutes
+later. The sweep may not have reached esplora yet.
+
+Only the Satora wallet can sign a refund, and only after the address's refund
+locktime. That is 24 hours after the swap was created, by median time past,
+which trails the clock by an hour or more. To refund, someone who can change
+the store's settings enters the customer's Bitcoin address on the refunds page
+and types `REFUND`. Nothing is refunded until the store enters an address.
+
+The page shows the locktime, which is when the first refund attempt runs, and
+the address can be changed until then. The refund goes out as soon as the chain
+accepts it, usually within two hours of the locktime. It pays mempool's
+recommended fee for confirmation within an hour, or an esplora's six-block
+estimate without mempool's API, at a fee rate of at least 1 sat/vB and a fee of
+at most 10,000 sats. A refund stays listed until it confirms. Outputs it left
+out because of the fee cap, or that arrived since, are swept to the same
+address. The wallet cannot be replaced while any swap waits for its refund. For
+a swap listed because no claim could complete, the SDK is asked again before
+each refund attempt, and the refund is held while a claim can complete after
+all.
+
+Once the refund could go out, a swap whose address holds nothing closes without
+a refund, and BTCPay notifies the store. This happens when the payment was
+replaced or dropped. Two reads at least ten minutes apart have to agree first,
+as they do for a swap whose unconfirmed funding is gone by the claim deadline.
+After a refund attempt, the swap also stays open while a transaction spending
+from its address is in the mempool or pays the refund address.
+
+A swap whose address holds only outputs worth less than a refund's fee closes
+the same way, but only once that has held for 24 hours, so a fee spike does not
+cost the customer the refund. The 24 hours start again when BTCPay restarts.
+Meanwhile the SDK is asked for the refund every ten minutes, because it can
+combine outputs that are each too small on their own, and the refund goes out
+as soon as it is worth its fee.
+
+If the store will not make a refund, for example because it paid the customer
+back another way, type `DISMISS` under the swap on the refunds page. The swap
+is no longer followed and nothing more is sent from its address, though a
+refund already broadcast can still confirm. BTCPay's log records the dismissal.
+A dismissal is refused while a refund attempt for the swap runs. Try again a
+minute later.
+
+If bitcoin reaches the address of a swap that has already closed (the store
+was notified with its swap id), open it for a refund again in the database:
+
+```sql
+UPDATE "BTCPayServer.Plugins.Satora"."SatoraChainSwaps"
+SET "CompletedAt" = NULL, "ClosedReason" = NULL,
+    "NeedsRefundAt" = now(), "NeedsRefundReason" = 'LeftoverOutputs'
+WHERE "SwapId" = '<swap id>';
+```
+
+The swap is then listed on the refunds page and refunded as above, to the
+address entered for it before if there was one. A swap that closed without a
+refund, or with outputs left after its refund, is reopened as it was, keeping
+the reason it needed one; the store's notification gives this statement with
+its swap id:
+
+```sql
+UPDATE "BTCPayServer.Plugins.Satora"."SatoraChainSwaps"
+SET "CompletedAt" = NULL, "ClosedReason" = NULL
+WHERE "SwapId" = '<swap id>';
+```
+
+BTCPay also notifies the store when:
+
+- a claim fails twice
+- a paid swap is still unclaimed 10 minutes before its claim deadline
+- the swap server reports a claim the wallet has no receipt for
+- the swap server does not know a swap
+- statuses could not be read for half an hour
+- a refund keeps failing after it should have become possible, and the address
+  still holds something to refund
+- a refund is held because a claim can complete after all
+- a swap closes without a refund, or with outputs left after one
+- a customer overpays
+- a swap is claimed after its invoice was paid in full
+- a swap reaches an unexpected status.
+
+Each alert names the swap's invoice and, unless it is about a refund, links to
+it. An invoice's page lists its Bitcoin (Satora) payments with their swap and
+claim, and links a payment taken off the invoice to the refunds page.
 
 ## Withdrawals
 
@@ -249,9 +412,9 @@ payment, include its swap id.
 
 The plugin stores its data in the BTCPay Postgres database under the schema
 `"BTCPayServer.Plugins.Satora"` (settings incl. the encrypted wallet seed, swap
-transactions, Lightning swaps and withdrawals). Its EF Core migration-history
-table lives in the search-path schema (typically `public`) as a table named
-`BTCPayServer.Plugins.Satora`.
+transactions, Lightning and on-chain swaps, and withdrawals). Its EF Core
+migration-history table lives in the search-path schema (typically `public`) as
+a table named `BTCPayServer.Plugins.Satora`.
 
 To fully purge the plugin's data:
 

@@ -1,6 +1,7 @@
 using BTCPayServer.Abstractions.Models;
 using BTCPayServer.Configuration;
 using BTCPayServer.Logging;
+using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
@@ -569,12 +570,14 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
         await warmUps.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
     }
 
-    // The worker claims a swap's VHTLC through UseAsync, so a replace or eviction waits for one in
-    // flight, and one handed the wallet just before an eviction runs on the next client.
-    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
-    public async Task AVhtlcClaimGivenAWalletJustBeforeAnEvictionRunsOnTheNextClient()
+    // The workers claim and refund a swap's VHTLC through UseAsync, so a replace or eviction waits for
+    // one in flight, and one handed the wallet just before an eviction runs on the next client.
+    [Theory(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AVhtlcClaimOrRefundGivenAWalletJustBeforeAnEvictionRunsOnTheNextClient(bool refund)
     {
-        const string store = "evict-claim";
+        var store = refund ? "evict-refund" : "evict-claim";
         var (registry, wallets) = db.Wallets();
         await ReadyAndEnabled(wallets, store);
         var oldWallet = await registry.GetAsync(store, TestContext.Current.CancellationToken);
@@ -586,7 +589,9 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
         var lightning = new SatoraLightningWallets(registry);
 
         // No client knows this swap, but only one that is not disposed says so.
-        await Assert.ThrowsAsync<SdkException>(() => lightning.ClaimAsync(store, "unknown", "tark1unknown", TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<SdkException>(() => refund
+            ? new SatoraChainWallets(lightning, registry, null!).RefundAsync(store, "unknown", "bcrt1qunknown", TestContext.Current.CancellationToken)
+            : lightning.ClaimAsync(store, "unknown", "tark1unknown", TestContext.Current.CancellationToken));
 
         Assert.NotSame(oldWallet, await registry.GetAsync(store, TestContext.Current.CancellationToken));
         await AssertDisposed(oldWallet);
@@ -661,6 +666,8 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
 
         public RecordingLightningConfig LightningConfig { get; } = new();
 
+        public RecordingChainConfig ChainConfig { get; } = new();
+
         public FakeLightningInvoices LightningInvoices { get; } = new();
 
         private string ConnectionString => new NpgsqlConnectionStringBuilder(Server) { Database = _name }.ConnectionString;
@@ -725,7 +732,7 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
             var registry = new SatoraWalletRegistry(_contexts, protector, null!, _networks, configuration,
                 Options.Create(new DataDirectories { DataDir = DataDir }), registryLogger ?? NullLogger<SatoraWalletRegistry>.Instance);
             _registries.Add(registry);
-            return (registry, new SatoraWalletService(_contexts, protector, registry, LightningConfig,
+            return (registry, new SatoraWalletService(_contexts, protector, registry, LightningConfig, ChainConfig,
                 LightningInvoices, logger ?? NullLogger<SatoraWalletService>.Instance));
         }
 

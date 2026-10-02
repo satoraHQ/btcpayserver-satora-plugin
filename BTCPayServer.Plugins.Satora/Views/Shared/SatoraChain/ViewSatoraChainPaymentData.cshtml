@@ -1,0 +1,69 @@
+@using BTCPayServer.Payments
+@using BTCPayServer.Plugins.Satora.Chain
+@using BTCPayServer.Services
+@using BTCPayServer.Services.Invoices
+@inject DisplayFormatter DisplayFormatter
+@inject PaymentMethodHandlerDictionary Handlers
+@model BTCPayServer.Models.InvoicingModels.InvoiceDetailsModel
+
+@* Shaped after BTCPay's Lightning/ViewLightningLikePaymentData.cshtml. *@
+@{
+    var payments = (Model.Payments ?? [])
+        .Where(p => p.PaymentMethodId == SatoraChainPaymentMethod.Id)
+        .Select(p => (Payment: p, Details: Handlers.TryGet(p.PaymentMethodId) is SatoraChainPaymentHandler handler ? handler.ParsePaymentDetails(p.Details) : null))
+        .Where(p => p.Details is not null)
+        .ToList();
+}
+
+@if (payments.Any())
+{
+    <section>
+        <h5>Bitcoin (Satora) payments</h5>
+        <div class="invoice-payments table-responsive mt-0">
+            <table class="table table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th class="w-150px">Status</th>
+                        <th class="w-175px">Destination</th>
+                        <th class="text-nowrap">Swap</th>
+                        <th class="text-nowrap">Claim</th>
+                        <th class="w-150px text-end">Paid</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var (payment, details) in payments)
+                    {
+                        <tr>
+                            <td>
+                                @if (payment.Accounted)
+                                {
+                                    @payment.Status
+                                }
+                                else
+                                {
+                                    <span>Not counted</span>
+                                    <a asp-controller="SatoraChainRefund" asp-action="Index" asp-route-storeId="@Model.Entity.StoreId" class="d-block">On-chain refunds</a>
+                                }
+                            </td>
+                            <td>
+                                <vc:truncate-center text="@payment.Destination" classes="truncate-center-id" />
+                            </td>
+                            <td>
+                                <vc:truncate-center text="@details!.SwapId" classes="truncate-center-id" />
+                            </td>
+                            <td>
+                                @if (details.ClaimTxId is not null)
+                                {
+                                    <vc:truncate-center text="@BTCPayServer.Plugins.Satora.Models.TokenFormat.BareTxId(details.ClaimTxId)" classes="truncate-center-id" />
+                                }
+                            </td>
+                            <td class="payment-value text-end text-nowrap">
+                                <span data-sensitive class="@(payment.Accounted ? "text-success" : "text-secondary text-decoration-line-through")">@DisplayFormatter.Currency(payment.Value, payment.Currency, divisibility: payment.Divisibility)</span>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </section>
+}

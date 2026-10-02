@@ -9,7 +9,7 @@
   <!-- Plugin specific properties -->
   <PropertyGroup>
     <Product>Satora</Product>
-    <Description>Receive Lightning payments into a per-store Satora wallet, and pay out and withdraw from it.</Description>
+    <Description>Receive Lightning and on-chain payments into a per-store Satora wallet, and pay out and withdraw from it.</Description>
     <Version>0.1.1</Version>
   </PropertyGroup>
 

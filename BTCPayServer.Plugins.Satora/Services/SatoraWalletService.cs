@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
@@ -13,6 +14,7 @@ public class SatoraWalletService(
     SatoraSeedProtector seedProtector,
     SatoraWalletRegistry registry,
     SatoraStoreLightningConfig lightningConfig,
+    SatoraStoreChainConfig chainConfig,
     SatoraLightningCredit lightningInvoices,
     ILogger<SatoraWalletService> logger)
 {
@@ -98,6 +100,7 @@ public class SatoraWalletService(
             else if (await CountOpenOperationsAsync(storeId) == 0)
                 await registry.EvictAsync(storeId, async () => await CountOpenOperationsAsync(storeId) == 0);
             await lightningConfig.SyncAsync(storeId, enabled, settings.LightningConnectionKey);
+            await chainConfig.SyncAsync(storeId, enabled);
             return true;
         }
         finally
@@ -173,7 +176,8 @@ public class SatoraWalletService(
     {
         await using var ctx = dbContextFactory.CreateContext();
         var open = await OpenOperationsAsync(ctx, storeId);
-        return await open.Swaps.CountAsync() + await open.LightningSwaps.CountAsync() + await open.Withdrawals.CountAsync();
+        return await open.Swaps.CountAsync() + await open.LightningSwaps.CountAsync() + await open.Withdrawals.CountAsync() +
+               await open.ChainSwaps.CountAsync();
     }
 
     // What CountOpenOperationsAsync counts, for the store to find: swaps that pay an invoice by their
@@ -194,6 +198,10 @@ public class SatoraWalletService(
         Add("Lightning swaps BTCPay has no invoice for",
             incoming.Where(s => !invoices.ContainsKey(s.PaymentHash)).Select(s => s.SwapId).ToList());
         Add("Lightning payments", lightning.Where(s => s.Direction == SatoraLightningDirection.ArkadeToLightning).Select(s => s.SwapId).ToList());
+        Add("on-chain swaps of invoices",
+            await open.ChainSwaps.Where(s => s.NeedsRefundAt == null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
+        Add("refunds on the On-chain refunds page for invoices",
+            await open.ChainSwaps.Where(s => s.NeedsRefundAt != null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
         Add("withdrawals to mark sent or failed on the withdrawals page",
             await open.Withdrawals.OrderBy(w => w.CreatedAt).Select(w => w.Id).ToListAsync());
         Add("swaps of an earlier plugin version", await open.Swaps.OrderBy(t => t.DateT).Select(t => t.TxID).ToListAsync());
@@ -210,7 +218,8 @@ public class SatoraWalletService(
     private sealed record OpenOperations(
         IQueryable<SatoraTx> Swaps,
         IQueryable<SatoraLightningSwap> LightningSwaps,
-        IQueryable<SatoraWithdrawal> Withdrawals);
+        IQueryable<SatoraWithdrawal> Withdrawals,
+        IQueryable<SatoraChainSwap> ChainSwaps);
 
     private static async Task<OpenOperations> OpenOperationsAsync(SatoraPluginDbContext ctx, string storeId)
     {
@@ -222,14 +231,17 @@ public class SatoraWalletService(
             t.StoreId == storeId && (t.Status == null || !SeedWriteGuard.SeedNotNeededStatuses.Contains(t.Status)));
         var lightningSwaps = ctx.SatoraLightningSwaps.Where(s => s.StoreId == storeId && s.CompletedAt == null);
         var withdrawals = SatoraWithdrawals.Unresolved(ctx.SatoraWithdrawals.Where(w => w.StoreId == storeId));
+        // Open on-chain swaps include those waiting for a refund, which only this seed can sign.
+        var chainSwaps = ctx.SatoraChainSwaps.Where(s => s.StoreId == storeId && s.CompletedAt == null);
         if (walletCreated is { } created)
         {
             var since = created.UtcDateTime;
             swaps = swaps.Where(t => t.DateT >= since);
             lightningSwaps = lightningSwaps.Where(s => s.CreatedAt >= created);
             withdrawals = withdrawals.Where(w => w.CreatedAt >= created);
+            chainSwaps = chainSwaps.Where(s => s.CreatedAt >= created);
         }
-        return new OpenOperations(swaps, lightningSwaps, withdrawals);
+        return new OpenOperations(swaps, lightningSwaps, withdrawals, chainSwaps);
     }
 
     private async Task<SeedWriteRefusal> WriteSeedAsync(string storeId, string mnemonic, SeedWriteKind kind, string? confirmation)
@@ -290,6 +302,7 @@ public class SatoraWalletService(
                 if (settings!.Enabled)
                     registry.Warm(storeId);
                 await lightningConfig.SyncAsync(storeId, settings.Enabled, settings.LightningConnectionKey);
+                await chainConfig.SyncAsync(storeId, settings.Enabled);
                 return SeedWriteRefusal.None;
             }
             // Counted before the registry's gate too, which waits for every wallet action in flight,
@@ -312,9 +325,12 @@ public class SatoraWalletService(
                 await SaveAsync();
                 return (SeedWriteRefusal.None, true);
             });
-            // A replaced wallet starts disabled, so a BTC-LN config that used it is removed.
+            // A replaced wallet starts disabled, so a BTC-LN config that used it is removed, as is the on-chain method.
             if (replaced == SeedWriteRefusal.None)
+            {
                 await lightningConfig.SyncAsync(storeId, settings!.Enabled, settings.LightningConnectionKey);
+                await chainConfig.SyncAsync(storeId, settings.Enabled);
+            }
             return replaced;
         }
         finally

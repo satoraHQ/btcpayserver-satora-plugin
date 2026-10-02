@@ -195,7 +195,7 @@ namespace BTCPayServer.Plugins.Satora.Controllers
         }
 
         private static string OpenOperations(string named) =>
-            "The wallet cannot be replaced while swaps or withdrawals that depend on it are open" + (named.Length > 0 ? $" ({named})" : "") +
-            ". Disable the wallet so no new swaps start, and try again once these are finished or marked.";
+            "The wallet cannot be replaced while swaps, refunds or withdrawals that depend on it are open" + (named.Length > 0 ? $" ({named})" : "") +
+            ". Disable the wallet so no new swaps start, and try again once these are finished, refunded or marked.";
     }
 }

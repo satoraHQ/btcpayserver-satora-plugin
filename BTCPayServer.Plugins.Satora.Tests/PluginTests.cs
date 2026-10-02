@@ -1,10 +1,15 @@
+using System.Reflection;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Lightning;
+using BTCPayServer.Payments;
+using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Controllers;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Services;
+using BTCPayServer.Services;
 using Microsoft.AspNetCore.Mvc.ApplicationParts;
 using Microsoft.AspNetCore.Mvc.Controllers;
+using Microsoft.AspNetCore.Razor.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Xunit;
@@ -47,7 +52,8 @@ public class PluginTests
             .Select(d => d.ImplementationType).ToList();
 
         Assert.Contains(extensions, e => e.Location == "store-wallets-nav");
-        Assert.DoesNotContain(extensions, e => e.Location.StartsWith("checkout", StringComparison.Ordinal));
+        Assert.DoesNotContain(extensions, e => e.Partial.StartsWith("CheckoutV2/", StringComparison.Ordinal));
+        Assert.Equal(["checkout-end"], extensions.Where(e => e.Location.StartsWith("checkout", StringComparison.Ordinal)).Select(e => e.Location));
         Assert.Contains(typeof(PluginMigrationRunner), hostedServices);
         Assert.DoesNotContain(typeof(SatoraSwapWatcher), hostedServices);
     }
@@ -61,6 +67,31 @@ public class PluginTests
         Assert.Contains(services, d => d.ServiceType == typeof(ILightningConnectionStringHandler) && d.ImplementationType == typeof(SatoraLightningConnectionStringHandler));
         Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraLightningWorker));
         foreach (var dependency in typeof(SatoraLightningWorker).GetConstructors().Single().GetParameters().Select(p => p.ParameterType)
+                     .Where(t => t.Assembly == typeof(Plugin).Assembly))
+            Assert.Contains(services, d => d.ServiceType == dependency);
+    }
+
+    [Fact]
+    public void RegistersTheOnChainMethodAsBtcpayRegistersItsOwn()
+    {
+        var services = new ServiceCollection();
+        new Plugin().Execute(services);
+
+        foreach (var type in new[] { typeof(IPaymentMethodHandler), typeof(IPaymentLinkExtension), typeof(ICheckoutModelExtension) })
+            Assert.Single(services, d => d.ServiceType == type);
+        var name = Assert.Single(services, d => d.ServiceType == typeof(PrettyNameProvider.UntranslatedPrettyName)).ImplementationInstance;
+        Assert.Equal(new PrettyNameProvider.UntranslatedPrettyName(SatoraChainPaymentMethod.Id, "Bitcoin (Satora)"), name);
+        foreach (var location in new[] { "checkout-end", "store-invoices-payments" })
+        {
+            var extension = Assert.Single(services.Select(d => d.ImplementationInstance).OfType<IUIExtension>(), e => e.Location == location);
+            // The partial resolves to a view compiled into the plugin.
+            Assert.Contains(typeof(Plugin).Assembly.GetCustomAttributes<RazorCompiledItemAttribute>(),
+                v => v.Identifier == $"/Views/Shared/{extension.Partial}.cshtml");
+        }
+        Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraChainWorker));
+        Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraChainPromptRenewer));
+        foreach (var dependency in new[] { typeof(SatoraChainWorker), typeof(SatoraChainPaymentHandler), typeof(SatoraChainPromptRenewer), typeof(SatoraChainWallets) }
+                     .SelectMany(t => t.GetConstructors().Single().GetParameters().Select(p => p.ParameterType))
                      .Where(t => t.Assembly == typeof(Plugin).Assembly))
             Assert.Contains(services, d => d.ServiceType == dependency);
     }

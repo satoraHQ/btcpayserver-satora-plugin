@@ -1,12 +1,13 @@
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Configuration;
+using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Lightning;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Satora.Tests;
 
-// The worker sends the claim deadline alert also after the deadline, for a claim still being
-// finished, so its text follows when BTCPay says it was sent, not when it is read.
+// The workers send the claim deadline alert also after the deadline (a claim still being finished, or
+// a payment first seen late), so its text follows when BTCPay says it was sent, not when it is read.
 public class SatoraClaimDeadlineAlertTests
 {
     private static readonly DateTimeOffset Deadline = new(2026, 10, 3, 14, 15, 55, TimeSpan.Zero);
@@ -38,6 +39,27 @@ public class SatoraClaimDeadlineAlertTests
         Assert.Equal(passed
             ? "Satora swap swap is paid but was not claimed into the Satora wallet by its claim deadline, 2026-10-03 14:15:55Z. Unless a claim already in progress completes, the payment goes back to the payer and does not pay the invoice. The return can take hours."
             : "Satora swap swap is paid but not yet claimed into the Satora wallet. If it is not claimed by 2026-10-03 14:15:55Z, the payment goes back to the payer and does not pay the invoice.",
+            vm.Body);
+    }
+
+    [Theory]
+    [MemberData(nameof(SentAt))]
+    public void TheOnChainAlertSaysTheDeadlinePassedWhenSentFromIt(int secondsFromDeadline, bool passed)
+    {
+        INotificationHandler handler = new SatoraChainNotification.Handler(new RouteLinks(), Options);
+        var vm = new NotificationViewModel { Created = Deadline.AddSeconds(secondsFromDeadline) };
+
+        handler.FillViewModel(new SatoraChainNotification
+        {
+            StoreId = "store",
+            SwapId = "swap",
+            Problem = SatoraChainNotification.Problems.NearClaimCutoff,
+            Deadline = Deadline
+        }, vm);
+
+        Assert.Equal(passed
+            ? "Satora on-chain swap swap is paid but was not claimed into the Satora wallet by its claim deadline, 2026-10-03 14:15:55Z. Unless a claim already in progress completes, the customer's bitcoin has to be refunded."
+            : "Satora on-chain swap swap is paid but not yet claimed into the Satora wallet. If it is not claimed by 2026-10-03 14:15:55Z, the customer's bitcoin has to be refunded.",
             vm.Body);
     }
 }
