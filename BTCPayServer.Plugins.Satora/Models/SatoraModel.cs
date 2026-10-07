@@ -14,7 +14,5 @@ namespace BTCPayServer.Plugins.Satora.Models
         public string? NetworkError { get; set; }
 
         public bool AutomatedLightningPayouts { get; set; }
-
-        public List<SatoraTx> Transactions { get; set; } = new();
     }
 }

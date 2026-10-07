@@ -21,7 +21,6 @@ public class Plugin : BaseBTCPayServerPlugin
 
     public override void Execute(IServiceCollection services)
     {
-        // The old stablecoin checkout extensions and SatoraSwapWatcher are not registered; see SatoraSwapController.
         services.AddUIExtension("store-wallets-nav", "SatoraPluginHeaderNav")
                 .AddUIExtension("layout-banner", "SatoraPaymentMethodNames")
                 .AddSingleton<SatoraPluginDbContextFactory>()
@@ -70,8 +69,6 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddHostedService<SatoraChainWorker>()
                 .AddHostedService<SatoraChainPromptRenewer>()
                 .AddSingleton<INotificationHandler, SatoraChainNotification.Handler>()
-                .AddSingleton<SatoraSettlementService>()
-                .AddSingleton<SatoraService>()
                 .AddSingleton<SatoraPluginService>();
     }
 

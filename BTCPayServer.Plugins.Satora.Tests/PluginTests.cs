@@ -7,8 +7,11 @@ using BTCPayServer.Plugins.Satora.Controllers;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Services;
 using BTCPayServer.Services;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ApplicationParts;
 using Microsoft.AspNetCore.Mvc.Controllers;
+using Microsoft.AspNetCore.Mvc.Routing;
 using Microsoft.AspNetCore.Razor.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -41,7 +44,7 @@ public class PluginTests
     }
 
     [Fact]
-    public void LeavesTheStablecoinCheckoutAndItsWatcherUnregistered()
+    public void RegistersTheNavTheMigrationsAndOnlyTheOnChainCheckout()
     {
         var services = new ServiceCollection();
         new Plugin().Execute(services);
@@ -52,10 +55,8 @@ public class PluginTests
             .Select(d => d.ImplementationType).ToList();
 
         Assert.Contains(extensions, e => e.Location == "store-wallets-nav");
-        Assert.DoesNotContain(extensions, e => e.Partial.StartsWith("CheckoutV2/", StringComparison.Ordinal));
         Assert.Equal(["checkout-end"], extensions.Where(e => e.Location.StartsWith("checkout", StringComparison.Ordinal)).Select(e => e.Location));
         Assert.Contains(typeof(PluginMigrationRunner), hostedServices);
-        Assert.DoesNotContain(typeof(SatoraSwapWatcher), hostedServices);
     }
 
     [Fact]
@@ -109,9 +110,9 @@ public class PluginTests
     }
 
     // BTCPay adds the plugin assembly as an MVC application part, so every public controller in it is routed
-    // whether or not the plugin registers anything.
+    // whether or not the plugin registers anything. Customers only ever reach BTCPay's own checkout.
     [Fact]
-    public void DoesNotRouteTheAnonymousSwapController()
+    public void EveryRouteNeedsARightOnTheStoreItNames()
     {
         var parts = new ApplicationPartManager();
         parts.ApplicationParts.Add(new AssemblyPart(typeof(Plugin).Assembly));
@@ -119,9 +120,22 @@ public class PluginTests
         var feature = new ControllerFeature();
         parts.PopulateFeature(feature);
 
-        var controllers = feature.Controllers.Select(t => t.AsType()).ToList();
-        Assert.Contains(typeof(SatoraPluginController), controllers);
-        Assert.DoesNotContain(typeof(SatoraSwapController), controllers);
+        Assert.Contains(typeof(SatoraPluginController).GetTypeInfo(), feature.Controllers);
+        foreach (var controller in feature.Controllers)
+        {
+            var policies = controller.GetCustomAttributes<AuthorizeAttribute>(true).Select(a => a.Policy).ToList();
+            Assert.NotEmpty(policies);
+            Assert.All(policies, policy => Assert.StartsWith("btcpay.store.", policy));
+            Assert.Empty(controller.GetCustomAttributes<AllowAnonymousAttribute>(true));
+            Assert.Contains("{storeId}", controller.GetCustomAttribute<RouteAttribute>()?.Template);
+            foreach (var action in controller.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            {
+                Assert.Empty(action.GetCustomAttributes<AllowAnonymousAttribute>(true));
+                // An absolute template would leave the controller's {storeId} route, and the store with it.
+                Assert.All(action.GetCustomAttributes(true).OfType<IRouteTemplateProvider>(),
+                    route => Assert.False(route.Template?.StartsWith('~') is true || route.Template?.StartsWith('/') is true, $"{controller.Name}.{action.Name}"));
+            }
+        }
     }
 
     // BTCPay renders layout-banner on every page of its main layout.

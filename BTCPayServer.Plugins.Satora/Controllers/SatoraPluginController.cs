@@ -141,28 +141,6 @@ namespace BTCPayServer.Plugins.Satora.Controllers
             });
         }
 
-        [HttpGet]
-        [Route("GetSwapStatus")]
-        public async Task<ActionResult> GetSwapStatus([FromRoute] string storeId, string swapId)
-        {
-            try
-            {
-                var status = await pluginService.DoGetSwapStatus(storeId, swapId);
-                return Ok(status);
-            }
-            catch (Exception ex)
-            {
-                return BadRequest(ex.Message);
-            }
-        }
-
-        [HttpGet("swap/{swapId}")]
-        public async Task<IActionResult> SwapDetails([FromRoute] string storeId, [FromRoute] string swapId)
-        {
-            var model = await pluginService.GetSwapDetailsAsync(storeId, swapId);
-            return model is null ? NotFound() : View(model);
-        }
-
         // As UIStoreOnChainWalletsController: a hot wallet is for server admins unless the server
         // allows hot wallets for every user (PoliciesSettings.AllowHotWalletForAll).
         private async Task<bool> CanUseHotWallet() =>

@@ -9,11 +9,11 @@ store can withdraw from it to Arkade, Lightning and Bitcoin destinations. The
 store holds its own keys, with no custodian in between.
 
 The Satora page, under Wallets in the store's menu, sets up the store's Satora
-wallet, shows its balance and lists earlier swaps (see [Wallet](#wallet)).
-Lightning and on-chain payments land in the wallet (see [Lightning](#lightning)
-and [On-chain payments](#on-chain-payments)). The wallet pays out over
-Lightning, to Arkade and on chain, by hand or automatically above a threshold
-(see [Withdrawals](#withdrawals)).
+wallet and shows its balance (see [Wallet](#wallet)). Lightning and on-chain
+payments land in the wallet (see [Lightning](#lightning) and
+[On-chain payments](#on-chain-payments)). The wallet pays out over Lightning,
+to Arkade and on chain, by hand or automatically above a threshold (see
+[Withdrawals](#withdrawals)).
 
 ## Requirements
 
@@ -528,6 +528,25 @@ The plugin stores its data in the BTCPay Postgres database under the schema
 transactions, Lightning and on-chain swaps, withdrawals and automatic
 withdrawal rules). Its EF Core migration-history table lives in the search-path
 schema (typically `public`) as a table named `BTCPayServer.Plugins.Satora`.
+
+`SatoraTransactions` holds the swaps of the stablecoin checkout that earlier
+versions of the plugin had, and nothing updates their status any more. A row
+whose `Status` is empty or not final counts as a swap that may still need the
+store's seed, so it blocks every replace of the wallet unless the wallet was
+created after the row. `WalletCreated` in `SatoraSettings` is empty for a wallet
+set up before that column existed, and stays empty when such a wallet is
+restored from its own phrase; then every such row counts. Once the swap server
+reports a final status for one of these swaps, an operator can record it:
+
+```sql
+UPDATE "BTCPayServer.Plugins.Satora"."SatoraTransactions"
+SET "Status" = '<final status>'
+WHERE "StoreId" = '<store id>' AND "TxID" = '<swap id>';
+```
+
+The final statuses are `ClientRedeemed`, `ServerRedeemed`,
+`ClientRedeemedAndClientRefunded`, `ClientRefunded`,
+`ClientRefundedServerFunded`, `ClientRefundedServerRefunded` and `Expired`.
 
 To fully purge the plugin's data:
 
