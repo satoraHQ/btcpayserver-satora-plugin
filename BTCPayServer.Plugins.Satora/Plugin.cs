@@ -7,6 +7,7 @@ using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Services;
+using BTCPayServer.Plugins.Satora.Stable;
 
 [assembly: InternalsVisibleTo("BTCPayServer.Plugins.Satora.Tests")]
 
@@ -69,7 +70,14 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddHostedService<SatoraChainWorker>()
                 .AddHostedService<SatoraChainPromptRenewer>()
                 .AddSingleton<INotificationHandler, SatoraChainNotification.Handler>()
+                .AddSingleton<SatoraStableSwaps>()
+                .AddSingleton<SatoraStableQuotes>()
+                .AddSingleton<SatoraStoreStableConfig>()
                 .AddSingleton<SatoraPluginService>();
+        // One method per coin, as BTCPay registers one per network.
+        foreach (var coin in SatoraStablePaymentMethod.All)
+            services.AddDefaultPrettyName(coin.Id, coin.PrettyName)
+                    .AddSingleton<IPaymentMethodHandler>(s => ActivatorUtilities.CreateInstance<SatoraStablePaymentHandler>(s, coin, BitcoinNetwork(s)));
     }
 
     private static BTCPayNetwork BitcoinNetwork(IServiceProvider services) =>

@@ -1,7 +1,18 @@
+using System.Collections.Concurrent;
+using BTCPayServer.Data;
+using BTCPayServer.Events;
+using BTCPayServer.Logging;
+using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Plugins.Satora.Services;
 using BTCPayServer.Plugins.Satora.Stable;
+using BTCPayServer.Services;
+using BTCPayServer.Services.Invoices;
+using BTCPayServer.Services.Stores;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Npgsql;
 using Xunit;
 
@@ -241,6 +252,110 @@ public class SatoraStableIntegrationTests(SatoraWalletIntegrationTests.Database 
         Assert.Equal("stablecoin deposits to send back for invoices: invoice-sweep", await wallets.DescribeOpenOperationsAsync("count-stable"));
     }
 
+    // The handler would make a swap through the store's wallet: no quote is read and no row written while
+    // the wallet is not set up, or set up but disabled.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task TheHandlerAsksNothingOfTheSwapServerWhileTheWalletIsDisabled()
+    {
+        var (registry, wallets) = db.Wallets();
+        var quotes = new SatoraStableFakes.Quotes();
+        var handler = new SatoraStablePaymentHandler(SatoraStablePaymentMethod.UsdcArbitrum, SatoraStablePaymentTests.Btc, registry, Swaps, quotes, EvmRpc);
+
+        await Refusal(handler, "stable-off");
+        var (_, phrase) = await wallets.GenerateAsync("stable-off", null);
+        Assert.True(await wallets.ConfirmBackupAsync("stable-off", phrase));
+        await Refusal(handler, "stable-off");
+
+        Assert.Empty(quotes.Reads);
+        Assert.False(await HasRowsAsync("stable-off"));
+    }
+
+    // BTCPay settles against the invoice's own tolerance: the owner can lower the store's after turning
+    // the coin on, and a Greenfield request can set an invoice's below the store's.
+    [Theory(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    [InlineData(0.99, 0.99)]
+    [InlineData(5, 0.99)]
+    public async Task TheHandlerMakesNoSwapWhileTheInvoicesPaymentToleranceIsBelowTheFloor(double storeTolerance, double invoiceTolerance)
+    {
+        var storeId = $"stable-tolerance-{(int)storeTolerance}";
+        var quotes = new SatoraStableFakes.Quotes();
+        var handler = await EnabledWalletHandlerAsync(storeId, quotes);
+
+        var refused = await Refusal(handler, storeId, invoiceTolerance, storeTolerance);
+
+        Assert.Contains("invoice's payment tolerance of 0.99% is below the 1%", refused.Message);
+        Assert.Equal([SatoraStablePaymentMethod.UsdcArbitrum], quotes.Reads);
+        Assert.False(await HasRowsAsync(storeId));
+    }
+
+    // The invoice is due 11 764 706 sats, below this route's minimum. Its own tolerance covers the swap's
+    // fees, so the store's, lowered since, does not refuse it first.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task TheHandlerMakesNoSwapForAnAmountOutsideTheRoutesRange()
+    {
+        var quotes = new SatoraStableFakes.Quotes { Quote = SatoraStableFakes.Quote(minAmount: 20_000_000) };
+        var handler = await EnabledWalletHandlerAsync("stable-range", quotes);
+
+        var refused = await Refusal(handler, "stable-range", invoiceTolerance: 5);
+
+        Assert.Contains("Satora takes stablecoin payments of at least 20000000 sats (0.20000000 BTC); this one is 11764706 sats.", refused.Message);
+        Assert.Equal([SatoraStablePaymentMethod.UsdcArbitrum], quotes.Reads);
+        Assert.False(await HasRowsAsync("stable-range"));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task TheStoreOffersTheOwnersStablecoinsWhileTheWalletIsEnabled()
+    {
+        var (_, wallets) = db.Wallets();
+        Assert.False(await wallets.SetStablecoinsAsync("stable-choice", [SatoraStablePaymentMethod.UsdcArbitrum]));
+        var (_, phrase) = await wallets.GenerateAsync("stable-choice", null);
+        Assert.True(await wallets.ConfirmBackupAsync("stable-choice", phrase));
+
+        Assert.True(await wallets.SetStablecoinsAsync("stable-choice", [SatoraStablePaymentMethod.UsdcArbitrum]));
+        Assert.True(await wallets.SetEnabledAsync("stable-choice", true));
+        Assert.True(await wallets.SetEnabledAsync("stable-choice", false));
+
+        Assert.Equal([SatoraStablePaymentMethod.UsdcArbitrum], await wallets.GetStablecoinsAsync("stable-choice"));
+        Assert.Equal("BTC-SATORA-USDC-ARBITRUM", (await db.Settings("stable-choice")).StablecoinMethods);
+        // A new wallet starts disabled with nothing chosen.
+        Assert.Equal(["off:", "off:BTC-SATORA-USDC-ARBITRUM", "on:BTC-SATORA-USDC-ARBITRUM", "off:BTC-SATORA-USDC-ARBITRUM"],
+            db.StableConfig.Calls("stable-choice"));
+        Assert.True(await wallets.SetStablecoinsAsync("stable-choice", []));
+        Assert.Empty(await wallets.GetStablecoinsAsync("stable-choice"));
+    }
+
+    private static readonly IConfiguration EvmRpc = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        [SatoraNetworks.EvmRpcArbitrumKey] = "http://127.0.0.1:1"
+    }).Build();
+
+    // Enabling needs no Arkade server; making a swap would.
+    private async Task<SatoraStablePaymentHandler> EnabledWalletHandlerAsync(string storeId, SatoraStableQuotes quotes)
+    {
+        var (registry, wallets) = db.Wallets();
+        var (_, phrase) = await wallets.GenerateAsync(storeId, null);
+        Assert.True(await wallets.ConfirmBackupAsync(storeId, phrase));
+        Assert.True(await wallets.SetEnabledAsync(storeId, true));
+        return new SatoraStablePaymentHandler(SatoraStablePaymentMethod.UsdcArbitrum, SatoraStablePaymentTests.Btc, registry, Swaps, quotes, EvmRpc);
+    }
+
+    private static async Task<PaymentMethodUnavailableException> Refusal(IPaymentMethodHandler handler, string storeId, double invoiceTolerance = 0,
+        double storeTolerance = 0)
+    {
+        var invoice = SatoraStablePaymentTests.Invoice();
+        invoice.PaymentTolerance = invoiceTolerance;
+        var context = new PaymentMethodContext(new StoreData { Id = storeId }, new StoreBlob { PaymentTolerance = storeTolerance }, new JObject(), handler,
+            invoice, new InvoiceLogs());
+        await handler.BeforeFetchingRates(context);
+        return await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handler.ConfigurePrompt(context));
+    }
+
+    private async Task<bool> HasRowsAsync(string storeId)
+    {
+        await using var ctx = db.Contexts.CreateContext();
+        return await ctx.SatoraStableSwaps.AnyAsync(s => s.StoreId == storeId, Ct);
+    }
+
     internal static SatoraStableSwap Swap(string storeId, string name, string? deposit = null, DateTimeOffset? createdAt = null) => new()
     {
         SwapId = $"{storeId}-{name}",
@@ -261,4 +376,82 @@ public class SatoraStableIntegrationTests(SatoraWalletIntegrationTests.Database 
         InvoiceExpiresAt = Now.AddMinutes(15),
         CreatedAt = createdAt ?? Now
     };
+}
+
+// BTCPay's own activation and renewal of a stablecoin prompt, through its InvoiceRepository and
+// InvoiceActivator, opt-in as above.
+public class SatoraStablePromptIntegrationTests(SatoraChainPromptIntegrationTests.BtcPayDatabase btcpay)
+    : IClassFixture<SatoraChainPromptIntegrationTests.BtcPayDatabase>
+{
+    private const string NeedsPostgres = "Set SATORA_TEST_POSTGRES to run";
+
+    public static bool HasPostgres => SatoraWalletIntegrationTests.HasPostgres;
+
+    // The checkout activates the prompt the customer picks, and a renewal forces a new one; both must
+    // reach ConfigurePrompt, which a prompt marked inactive again would never do.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task BtcpaysActivatorConfiguresTheWaitingPromptAndRenewsIt()
+    {
+        var events = new EventAggregator(new Logs());
+        var invoices = new InvoiceRepository(btcpay.Contexts, events);
+        var handler = new SatoraStableFakes.Handler(SatoraStablePaymentTests.Btc);
+        var handlers = new PaymentMethodHandlerDictionary([handler]);
+        StoreData store;
+        await using (var ctx = btcpay.Contexts.CreateContext())
+        {
+            store = await ctx.Stores.SingleAsync(s => s.Id == "store", Ct);
+            store.SetPaymentMethodConfig(handler, new SatoraStablePaymentMethodConfig());
+            await ctx.SaveChangesAsync(Ct);
+        }
+        var invoice = SatoraStablePaymentTests.Invoice();
+        invoice.Id = "invoice-stable";
+        invoice.InvoiceTime = DateTimeOffset.UtcNow;
+        invoice.MonitoringExpiration = invoice.ExpirationTime.AddHours(1);
+        // As UIInvoiceController creates an invoice, with the store's lazy payment methods off.
+        var creation = new InvoiceCreationContext(store, store.GetStoreBlob(), invoice, new InvoiceLogs(), handlers, null);
+        creation.SetLazyActivation(false);
+        await creation.BeforeFetchingRates();
+        await creation.CreatePaymentPrompts();
+        var created = creation.PaymentMethodContexts[handler.PaymentMethodId];
+        Assert.Equal(PaymentMethodContext.ContextStatus.WaitingForActivation, created.Status);
+        invoice.SetPaymentPrompts(new PaymentPromptDictionary([created.Prompt]));
+        await using (var ctx = btcpay.Contexts.CreateContext())
+        {
+            var data = new InvoiceData { Id = invoice.Id, StoreDataId = "store", Status = "New" };
+            data.SetBlob(invoice);
+            ctx.Invoices.Add(data);
+            await ctx.SaveChangesAsync(Ct);
+        }
+        var activator = new InvoiceActivator(invoices, events, null!, handlers,
+            new StoreRepository(btcpay.Contexts, new JsonSerializerSettings(), events, null!), new WalletRepository(btcpay.Contexts));
+
+        Assert.True(await activator.ActivateInvoicePaymentMethod(invoice.Id, handler.PaymentMethodId));
+        var activated = (await invoices.GetInvoice(invoice.Id)).GetPaymentPrompt(handler.PaymentMethodId)!;
+        Assert.True(activated.Activated);
+        Assert.Equal(handler.Swaps[0].DepositAddress, activated.Destination);
+        Assert.Equal([11_764_706L], handler.Requested);
+
+        Assert.True(await activator.ActivateInvoicePaymentMethod(invoice.Id, handler.PaymentMethodId, forceNew: true));
+        var renewed = (await invoices.GetInvoice(invoice.Id)).GetPaymentPrompt(handler.PaymentMethodId)!;
+        Assert.True(renewed.Activated);
+        Assert.Equal(handler.Swaps[1].DepositAddress, renewed.Destination);
+        Assert.Equal(handler.Swaps[1].SwapId, handler.ParsePaymentPromptDetails(renewed.Details).SwapId);
+        Assert.Equal(2, handler.Requested.Count);
+    }
+
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+}
+
+// Records what the wallet service asks of the store's stablecoin configs, which need BTCPay's own database.
+public sealed class RecordingStableConfig() : SatoraStoreStableConfig(null!, null!)
+{
+    private readonly ConcurrentQueue<(string StoreId, string Call)> _calls = new();
+
+    public List<string> Calls(string storeId) => _calls.Where(c => c.StoreId == storeId).Select(c => c.Call).ToList();
+
+    public override Task SyncAsync(string storeId, bool walletEnabled, IReadOnlyCollection<SatoraStablecoin> coins)
+    {
+        _calls.Enqueue((storeId, $"{(walletEnabled ? "on" : "off")}:{string.Join(",", coins.Select(c => c.Id))}"));
+        return Task.CompletedTask;
+    }
 }

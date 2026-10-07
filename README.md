@@ -324,6 +324,47 @@ Each alert names the swap's invoice and, unless it is about a refund, links to
 it. An invoice's page lists its Bitcoin (Satora) payments with their swap and
 claim, and links a payment taken off the invoice to the refunds page.
 
+## Stablecoin payments
+
+Turn on **USDC on Arbitrum (Satora)** (`BTC-SATORA-USDC-ARBITRUM`) on the
+Satora page. It is offered while the wallet is enabled. USDC on Polygon is not
+offered, because the swap server is retiring Polygon as a direct chain. Turning
+a stablecoin on needs the same hot wallet rights as enabling the wallet. Anyone
+who can change the store's settings can turn one off.
+
+A swap is made only once the customer picks the method, whatever the store's
+lazy payment methods setting. It is an EVM to Arkade swap with its own deposit
+address, derived from the store's seed. The prompt is priced in bitcoin at the
+store's rate. The swap is made for exactly the amount due, and the customer's
+token amount includes the swap's fees, though a payment can arrive short (see
+below).
+
+On mainnet a swap's funding cutoff is about 11 hours 23 minutes after the swap
+is made, and an invoice has to expire at least an hour before it. A longer
+invoice gets no USDC prompt. BTCPay's default expiry fits. Expiry, the
+invoice's payment tolerance and the route's amount limits are checked before
+the swap is made, so a refused invoice costs no swap on the server. On mainnet
+expiry is checked against the swap server's 12 hour window. Elsewhere it is
+checked against a swap the server made in the last hour, or without one,
+against the invoice's own swap.
+
+Set the store's payment tolerance a point or so above the floor the Satora page
+names. A payment can arrive short by up to the swap's fees, because the DEX
+swap that funds it only has to deliver the payout, and the swap server takes
+its fees from that. A stablecoin can be turned on only while the store's
+tolerance covers that share of a 100,000 sat payment, and is at least 1%. The
+floor rises with the swap's fees. The Satora page warns while the store's
+tolerance is below it, for example after the tolerance is lowered. BTCPay
+settles an invoice by the tolerance it was created with, so an invoice whose
+own tolerance is below the floor gets no swap. That includes an invoice created
+through the Greenfield API with a lower tolerance, or before the store's was
+raised.
+
+Set `BTCPAY_SATORA_EVMRPC_ARBITRUM` (or `satora_evmrpc_arbitrum=` in
+`settings.config`) to an Arbitrum node, on mainnet too. Without it the SDK uses
+the chain's public nodes, which rate-limit. Off mainnet the chain is a test
+fork, so until the setting is there the method gets no prompt.
+
 ## Withdrawals
 
 The withdrawals page, opened with **Withdraw** on the Satora page, sends from
@@ -525,9 +566,10 @@ payment, include its swap id.
 
 The plugin stores its data in the BTCPay Postgres database under the schema
 `"BTCPayServer.Plugins.Satora"` (settings incl. the encrypted wallet seed, swap
-transactions, Lightning and on-chain swaps, withdrawals and automatic
-withdrawal rules). Its EF Core migration-history table lives in the search-path
-schema (typically `public`) as a table named `BTCPayServer.Plugins.Satora`.
+transactions, Lightning, on-chain and stablecoin swaps, withdrawals and
+automatic withdrawal rules). Its EF Core migration-history table lives in the
+search-path schema (typically `public`) as a table named
+`BTCPayServer.Plugins.Satora`.
 
 `SatoraTransactions` holds the swaps of the stablecoin checkout that earlier
 versions of the plugin had, and nothing updates their status any more. A row
@@ -660,4 +702,7 @@ localhost:3000/api); [Wallet](#wallet) says how to point them elsewhere.
 
 Run the Satora backend's swap daemon with
 `LENDASWAP_REGTEST_SERVER_TIMEOUT_SECS=1800`: its default window of 120 seconds
-leaves no time to claim.
+leaves no time to claim. A stablecoin payment needs more, because its funding
+cutoff falls 1,140 s before the VHTLC refund locktime, so set
+`LENDASWAP_REGTEST_SERVER_TIMEOUT_SECS` to at least 2,100 for a 15-minute
+invoice.

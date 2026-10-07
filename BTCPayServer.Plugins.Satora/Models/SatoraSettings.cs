@@ -27,4 +27,8 @@ public class SatoraSettings
     public DateTimeOffset? BackupConfirmedAt { get; set; }
 
     public string? LightningConnectionKey { get; set; }
+
+    // The stablecoin payment methods the owner turned on, comma separated. BTCPay offers them only
+    // while the wallet is enabled.
+    public string? StablecoinMethods { get; set; }
 }

@@ -6,6 +6,7 @@ using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Controllers;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Services;
+using BTCPayServer.Plugins.Satora.Stable;
 using BTCPayServer.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -90,10 +91,10 @@ public class PluginTests
         var services = new ServiceCollection();
         new Plugin().Execute(services);
 
-        foreach (var type in new[] { typeof(IPaymentMethodHandler), typeof(IPaymentLinkExtension), typeof(ICheckoutModelExtension) })
+        foreach (var type in new[] { typeof(IPaymentLinkExtension), typeof(ICheckoutModelExtension) })
             Assert.Single(services, d => d.ServiceType == type);
-        var name = Assert.Single(services, d => d.ServiceType == typeof(PrettyNameProvider.UntranslatedPrettyName)).ImplementationInstance;
-        Assert.Equal(new PrettyNameProvider.UntranslatedPrettyName(SatoraChainPaymentMethod.Id, "Bitcoin (Satora)"), name);
+        Assert.Contains(services, d => d.ServiceType == typeof(SatoraChainPaymentHandler));
+        Assert.Contains(new PrettyNameProvider.UntranslatedPrettyName(SatoraChainPaymentMethod.Id, "Bitcoin (Satora)"), PrettyNames(services));
         foreach (var location in new[] { "checkout-end", "store-invoices-payments" })
         {
             var extension = Assert.Single(services.Select(d => d.ImplementationInstance).OfType<IUIExtension>(), e => e.Location == location);
@@ -108,6 +109,27 @@ public class PluginTests
                      .Where(t => t.Assembly == typeof(Plugin).Assembly))
             Assert.Contains(services, d => d.ServiceType == dependency);
     }
+
+    [Fact]
+    public void RegistersOneStablecoinMethodPerCoinBesideTheOnChainOne()
+    {
+        var services = new ServiceCollection();
+        new Plugin().Execute(services);
+
+        Assert.Equal(1 + SatoraStablePaymentMethod.All.Count, services.Count(d => d.ServiceType == typeof(IPaymentMethodHandler)));
+        foreach (var coin in SatoraStablePaymentMethod.All)
+            Assert.Contains(new PrettyNameProvider.UntranslatedPrettyName(coin.Id, coin.PrettyName), PrettyNames(services));
+        Assert.Equal(["USDC on Arbitrum (Satora)"], SatoraStablePaymentMethod.All.Select(c => c.PrettyName));
+        // The coin is passed to each handler; everything else comes from the container.
+        foreach (var dependency in new[] { typeof(SatoraStablePaymentHandler), typeof(SatoraWalletService), typeof(SatoraPluginController) }
+                     .SelectMany(t => t.GetConstructors().Single().GetParameters().Select(p => p.ParameterType))
+                     .Where(t => t.Assembly == typeof(Plugin).Assembly && t != typeof(SatoraStablecoin)))
+            Assert.Contains(services, d => d.ServiceType == dependency);
+    }
+
+    private static List<PrettyNameProvider.UntranslatedPrettyName> PrettyNames(ServiceCollection services) =>
+        services.Where(d => d.ServiceType == typeof(PrettyNameProvider.UntranslatedPrettyName))
+            .Select(d => (PrettyNameProvider.UntranslatedPrettyName)d.ImplementationInstance!).ToList();
 
     // BTCPay adds the plugin assembly as an MVC application part, so every public controller in it is routed
     // whether or not the plugin registers anything. Customers only ever reach BTCPay's own checkout.

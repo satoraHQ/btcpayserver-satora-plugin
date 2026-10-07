@@ -4,6 +4,7 @@ using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
+using BTCPayServer.Plugins.Satora.Stable;
 using Microsoft.EntityFrameworkCore;
 using ArkadeBalance = uniffi.satora_sdk_ffi.ArkadeBalance;
 
@@ -15,6 +16,7 @@ public class SatoraWalletService(
     SatoraWalletRegistry registry,
     SatoraStoreLightningConfig lightningConfig,
     SatoraStoreChainConfig chainConfig,
+    SatoraStoreStableConfig stableConfig,
     SatoraAutoWithdrawRules autoWithdrawRules,
     SatoraLightningCredit lightningInvoices,
     ILogger<SatoraWalletService> logger)
@@ -102,6 +104,7 @@ public class SatoraWalletService(
                 await registry.EvictAsync(storeId, async () => await CountOpenOperationsAsync(storeId) == 0);
             await lightningConfig.SyncAsync(storeId, enabled, settings.LightningConnectionKey);
             await chainConfig.SyncAsync(storeId, enabled);
+            await stableConfig.SyncAsync(storeId, enabled, SatoraStablePaymentMethod.Parse(settings.StablecoinMethods));
             return true;
         }
         finally
@@ -161,6 +164,39 @@ public class SatoraWalletService(
             if (settings is not { Enabled: true, LightningConnectionKey: { } key } || seedProtector.Read(settings).State != SatoraWalletState.Ready)
                 return false;
             await lightningConfig.SyncAsync(storeId, true, key, replace: true);
+            return true;
+        }
+        finally
+        {
+            walletLock.Release();
+        }
+    }
+
+    public virtual async Task<IReadOnlyList<SatoraStablecoin>> GetStablecoinsAsync(string storeId)
+    {
+        await using var ctx = dbContextFactory.CreateContext();
+        return SatoraStablePaymentMethod.Parse(await ctx.SatoraSettings
+            .Where(s => s.StoreId == storeId)
+            .Select(s => s.StablecoinMethods)
+            .FirstOrDefaultAsync());
+    }
+
+    // The stablecoin methods the owner offers, kept whatever the wallet's state: false when the store
+    // has no wallet yet. Under the wallet lock, so an enable or seed write never syncs the store's
+    // methods from a choice this has replaced.
+    public virtual async Task<bool> SetStablecoinsAsync(string storeId, IReadOnlyCollection<SatoraStablecoin> coins)
+    {
+        var walletLock = WalletLock(storeId);
+        await walletLock.WaitAsync();
+        try
+        {
+            await using var ctx = dbContextFactory.CreateContext();
+            var settings = await ctx.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == storeId);
+            if (settings is null)
+                return false;
+            settings.StablecoinMethods = SatoraStablePaymentMethod.Format(coins);
+            await ctx.SaveChangesAsync();
+            await stableConfig.SyncAsync(storeId, settings.Enabled, SatoraStablePaymentMethod.Parse(settings.StablecoinMethods));
             return true;
         }
         finally
@@ -316,6 +352,7 @@ public class SatoraWalletService(
                     registry.Warm(storeId);
                 await lightningConfig.SyncAsync(storeId, settings.Enabled, settings.LightningConnectionKey);
                 await chainConfig.SyncAsync(storeId, settings.Enabled);
+                await stableConfig.SyncAsync(storeId, settings.Enabled, SatoraStablePaymentMethod.Parse(settings.StablecoinMethods));
                 return SeedWriteRefusal.None;
             }
             // Counted before the registry's gate too, which waits for every wallet action in flight,
@@ -343,6 +380,7 @@ public class SatoraWalletService(
             {
                 await lightningConfig.SyncAsync(storeId, settings!.Enabled, settings.LightningConnectionKey);
                 await chainConfig.SyncAsync(storeId, settings.Enabled);
+                await stableConfig.SyncAsync(storeId, settings.Enabled, SatoraStablePaymentMethod.Parse(settings.StablecoinMethods));
             }
             return replaced;
         }

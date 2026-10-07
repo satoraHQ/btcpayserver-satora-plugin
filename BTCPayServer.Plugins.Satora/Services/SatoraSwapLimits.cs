@@ -19,10 +19,11 @@ public static partial class SatoraSwapLimits
             return null;
         var sats = long.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture) * 100_000_000 +
                    long.Parse(match.Groups[3].Value + match.Groups[4].Value + match.Groups[5].Value, CultureInfo.InvariantCulture);
-        var limit = string.Create(CultureInfo.InvariantCulture,
-            $"{(match.Groups[1].Value == "Min" ? "at least" : "at most")} {sats} sats ({sats / 100_000_000m:0.00000000} BTC)");
-        return new SatoraAmountRefusedException(message(limit), error);
+        return new SatoraAmountRefusedException(message(Limit(match.Groups[1].Value == "Min", sats)), error);
     }
+
+    public static string Limit(bool minimum, long sats) =>
+        string.Create(CultureInfo.InvariantCulture, $"{(minimum ? "at least" : "at most")} {sats} sats ({sats / 100_000_000m:0.00000000} BTC)");
 
     public static async Task<T> CheckAsync<T>(Func<Task<T>> call, Func<string, string> message)
     {

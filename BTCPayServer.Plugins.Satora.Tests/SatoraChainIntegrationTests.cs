@@ -341,11 +341,7 @@ public class SatoraChainPromptIntegrationTests(SatoraChainPromptIntegrationTests
     {
         var events = new EventAggregator(new Logs());
         var invoices = new InvoiceRepository(btcpay.Contexts, events);
-        var handlers = new PaymentMethodHandlerDictionary([new SatoraChainPaymentHandler(new BTCPayNetwork
-        {
-            CryptoCode = "BTC",
-            NBXplorerNetwork = new NBXplorer.NBXplorerNetworkProvider(NBitcoin.ChainName.Regtest).GetFromCryptoCode("BTC")
-        }, null!, null!)]);
+        var handlers = new PaymentMethodHandlerDictionary([new SatoraChainPaymentHandler(SatoraStablePaymentTests.Btc, null!, null!)]);
         var credit = new SatoraChainCredit(invoices, new PaymentService(events, btcpay.Contexts, handlers, invoices), handlers, events,
             NullLogger<SatoraChainCredit>.Instance);
         var invoiceId = await btcpay.AddInvoiceAsync("paid");

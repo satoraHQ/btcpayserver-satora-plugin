@@ -6,7 +6,7 @@ namespace BTCPayServer.Plugins.Satora.Services
         SatoraWalletService walletService,
         SatoraWithdrawalService withdrawalService)
     {
-        public async Task<SatoraModel> GetStoreData(string storeId)
+        public virtual async Task<SatoraModel> GetStoreData(string storeId)
         {
             var status = await walletService.GetStatusAsync(storeId);
             return new SatoraModel
@@ -15,7 +15,8 @@ namespace BTCPayServer.Plugins.Satora.Services
                 Enabled = status.Enabled,
                 WalletState = status.State,
                 NetworkError = walletService.NetworkError,
-                AutomatedLightningPayouts = await withdrawalService.HasAutomatedLightningPayoutsAsync(storeId)
+                AutomatedLightningPayouts = await withdrawalService.HasAutomatedLightningPayoutsAsync(storeId),
+                Stablecoins = await walletService.GetStablecoinsAsync(storeId)
             };
         }
     }

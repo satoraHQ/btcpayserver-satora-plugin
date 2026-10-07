@@ -2,6 +2,7 @@
 @using BTCPayServer.Abstractions.Models
 @using BTCPayServer.Plugins.Satora.Models
 @using BTCPayServer.Plugins.Satora.Services
+@using BTCPayServer.Plugins.Satora.Stable
 @using BTCPayServer.Plugins.Satora.Views
 @using BTCPayServer.Client
 
@@ -178,6 +179,28 @@
             <a asp-controller="SatoraWithdraw" asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-primary mb-3">Withdraw</a>
             <a asp-controller="SatoraChainRefund" asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-outline-secondary mb-3">On-chain refunds</a>
             <partial name="_SatoraSpendingBoundary" model="Model.AutomatedLightningPayouts" />
+
+            <h4 class="mt-4">Stablecoins</h4>
+            @foreach (var (coin, floor) in Model.StablecoinToleranceShortfalls)
+            {
+                <div class="alert alert-warning">@coin.PrettyName is on but left out of checkout. Raise the store's payment tolerance from @Model.PaymentTolerance.ToString("0.##")% to at least @floor.ToString("0.#")%.</div>
+            }
+            <form method="post" asp-action="Stablecoins" asp-route-storeId="@Model.StoreId" class="mb-4">
+                @foreach (var coin in SatoraStablePaymentMethod.All)
+                {
+                    var on = Model.Stablecoins.Contains(coin);
+                    <div class="d-flex align-items-center gap-3 mb-2">
+                        <input id="Stablecoin-@coin.Id" name="Methods" value="@coin.Id" type="checkbox" class="btcpay-toggle" checked="@on" disabled="@(!on && !Model.CanUseHotWallet)" />
+                        <label for="Stablecoin-@coin.Id" class="form-check-label">@coin.PrettyName</label>
+                    </div>
+                }
+                <button type="submit" class="btn btn-primary">Save</button>
+                <div class="form-text">
+                    Offered at checkout while the wallet is enabled. A payment can arrive short by up to the swap's fees, so a stablecoin needs a
+                    <a asp-controller="UIStores" asp-action="GeneralSettings" asp-route-storeId="@Model.StoreId">payment tolerance</a> of at least @SatoraStableActions.MinToleranceFloorPercent% to turn on,
+                    more while fees are high. The store's tolerance is now @Model.PaymentTolerance.ToString("0.##")%.
+                </div>
+            </form>
         }
     }
 </div>

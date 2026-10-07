@@ -92,7 +92,7 @@ public class SatoraChainPaymentHandler(
 
     // Below the route's minimum, no liquidity, an unreachable server or a wallet that cannot be opened:
     // BTCPay leaves the method out of this invoice and logs why.
-    internal static async Task<T> AsUnavailable<T>(Func<Task<T>> create, TimeSpan timeout)
+    internal static async Task<T> AsUnavailable<T>(Func<Task<T>> create, TimeSpan timeout, string kind = "on-chain")
     {
         try
         {
@@ -108,7 +108,7 @@ public class SatoraChainPaymentHandler(
         }
         catch (Exception e)
         {
-            throw new PaymentMethodUnavailableException($"No Satora on-chain swap for this invoice ({e.Message})", e);
+            throw new PaymentMethodUnavailableException($"No Satora {kind} swap for this invoice ({e.Message})", e);
         }
     }
 
