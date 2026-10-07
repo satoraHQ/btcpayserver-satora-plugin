@@ -42,7 +42,7 @@ public class SatoraWithdrawReview
     // Confirmed and pre-confirmed sats, which withdrawals spend.
     public long AvailableSats { get; set; }
 
-    // Spent by no withdrawal; they stay in the wallet until the owner settles them.
+    // Spent by no withdrawal; they stay in the wallet until a settle, the owner's or the plugin's own.
     public long RecoverableSats { get; set; }
 
     public string? Key { get; set; }

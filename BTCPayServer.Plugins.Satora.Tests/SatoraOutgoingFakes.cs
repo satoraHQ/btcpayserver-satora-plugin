@@ -189,8 +189,9 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
     // Awaited by AmountsForSwapAsync before it answers.
     public Func<Task> AmountsGate { get; set; } = () => Task.CompletedTask;
     public Exception? SendError { get; set; }
-    // Awaited by SendArkadeAsync before it returns.
+    // Awaited by SendArkadeAsync before it returns, once it has completed SendStarted.
     public Task SendGate { get; set; } = Task.CompletedTask;
+    public TaskCompletionSource SendStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Exception? SettleError { get; set; }
     // What RenewArkadeAsync returns, unless RenewError is set.
     public string? RenewedBatch { get; set; }
@@ -234,6 +235,7 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
     public async Task<string> SendArkadeAsync(string destination, ulong amountSats)
     {
         events.Add($"send {destination} {amountSats}");
+        SendStarted.TrySetResult();
         await SendGate;
         return SendError is null ? "ark-send" : throw SendError;
     }

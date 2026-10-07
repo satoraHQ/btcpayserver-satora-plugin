@@ -43,8 +43,9 @@ public enum SatoraAutoWithdrawOutcome
     Failed
 }
 
-// Message: what happened, worded to follow the outcome in a log line or an alert.
-public sealed record SatoraAutoWithdrawResult(SatoraAutoWithdrawOutcome Outcome, string Message);
+// Message: what happened, worded to follow the outcome in a log line or an alert. WithdrawalId: for a
+// Pending run, its row, which SatoraOutgoingWorker closes once the payment is paid or refunded.
+public sealed record SatoraAutoWithdrawResult(SatoraAutoWithdrawOutcome Outcome, string Message, string? WithdrawalId = null);
 
 public enum SatoraSettleOutcome
 {
@@ -468,7 +469,7 @@ public class SatoraWithdrawalService(
         return result?.Kind switch
         {
             SatoraWithdrawResultKind.Sent => AutoResult(SatoraAutoWithdrawOutcome.Sent, result.Message),
-            SatoraWithdrawResultKind.Pending => AutoResult(SatoraAutoWithdrawOutcome.Pending, result.Message),
+            SatoraWithdrawResultKind.Pending => new SatoraAutoWithdrawResult(SatoraAutoWithdrawOutcome.Pending, result.Message, withdrawal.Id),
             SatoraWithdrawResultKind.Unknown => AutoResult(SatoraAutoWithdrawOutcome.Unknown, result.Message),
             _ => AutoResult(SatoraAutoWithdrawOutcome.Failed, result?.Error ?? result?.Message ?? "its row could not be written")
         };

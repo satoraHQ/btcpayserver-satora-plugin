@@ -154,9 +154,9 @@ For payments out of the wallet it also notifies when:
 An alert about a swap that pays an invoice names the invoice and links to it.
 
 Each alert goes out once per swap, or once per outage for status alerts, and a
-BTCPay restart does not send it again. The on-chain alerts below work the same
-way. After a restart, a claim that keeps failing is reported again once it has
-failed twice more.
+BTCPay restart does not send it again. The on-chain and automatic withdrawal
+alerts below work the same way. After a restart, a claim, settle or automatic
+withdrawal that keeps failing is reported again once it has failed twice more.
 
 ## On-chain payments
 
@@ -338,17 +338,24 @@ Arkade change.
 
 Withdrawals spend only confirmed and pre-confirmed funds. Recoverable funds
 (expired, swept or below dust) stay in the wallet until they are settled into
-an Arkade batch. While they add up to dust or more, **Settle recoverable
-funds** on the withdrawals page settles them. Recoverable funds below dust,
-such as the change an Arkade withdrawal leaves, cannot be settled on their own.
-They are settled once more funds become recoverable, and they never hold up a
-withdrawal.
+an Arkade batch, and until then getting them back depends on the Arkade server.
+They are settled automatically for every store whose Satora wallet is enabled,
+within 5 minutes of turning recoverable on mainnet and 30 seconds on other
+networks. This runs even while a withdrawal's outcome is unknown, because a
+settle pays only the wallet. A failed settle is retried after 5 minutes, 15
+minutes, an hour and then every 6 hours. BTCPay notifies the store's owners and
+the server admins once it has failed twice in a row. While recoverable funds
+add up to dust or more, **Settle recoverable funds** on the withdrawals page
+settles them at once. Recoverable funds below dust, such as the change an
+Arkade withdrawal leaves, cannot be settled on their own. They are settled once
+more funds become recoverable, and they never hold up a withdrawal.
 
 BTCPay's log records each withdrawal with its amount, fee and transaction, and
-each settle with its Arkade batch. For a Lightning withdrawal the transaction
-is the one funding its swap, and the log also records the payment hash of the
-invoice it pays. For a Lightning address or LNURL, that is the invoice its
-endpoint issued.
+each settle with its Arkade batch and whether it was started on the withdrawals
+page or automatically. For a Lightning withdrawal the transaction is the one
+funding its swap, and the log also records the payment hash of the invoice it
+pays. For a Lightning address or LNURL, that is the invoice its endpoint
+issued.
 
 If the wallet cannot tell whether an Arkade or on-chain withdrawal went out,
 for example because the Arkade server stopped answering mid-send or BTCPay

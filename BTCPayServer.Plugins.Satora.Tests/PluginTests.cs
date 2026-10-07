@@ -72,6 +72,18 @@ public class PluginTests
     }
 
     [Fact]
+    public void RegistersTheWalletAutomationWorkerWithItsDependencies()
+    {
+        var services = new ServiceCollection();
+        new Plugin().Execute(services);
+
+        Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraWalletAutomationWorker));
+        foreach (var dependency in typeof(SatoraWalletAutomationWorker).GetConstructors().Single().GetParameters().Select(p => p.ParameterType)
+                     .Where(t => t.Assembly == typeof(Plugin).Assembly))
+            Assert.Contains(services, d => d.ServiceType == dependency);
+    }
+
+    [Fact]
     public void RegistersTheOnChainMethodAsBtcpayRegistersItsOwn()
     {
         var services = new ServiceCollection();
