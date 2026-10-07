@@ -46,8 +46,9 @@ public class SatoraWithdrawController(SatoraWithdrawalService withdrawalService)
     [HttpPost("settle")]
     public async Task<IActionResult> Settle([FromRoute] string storeId)
     {
-        var (success, message) = await withdrawalService.SettleAsync(storeId);
-        TempData[success ? WellKnownTempData.SuccessMessage : WellKnownTempData.ErrorMessage] = message;
+        var result = await withdrawalService.SettleAsync(storeId);
+        var success = result.Outcome is SatoraSettleOutcome.Settled or SatoraSettleOutcome.NothingToSettle;
+        TempData[success ? WellKnownTempData.SuccessMessage : WellKnownTempData.ErrorMessage] = result.Message;
         return RedirectToAction(nameof(Index), new { storeId });
     }
 

@@ -3,10 +3,8 @@ using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Plugins.Satora.Services;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using NBitcoin;
 using Satora.Sdk;
-using LNURL;
 using Xunit;
 using ArkadeBalance = uniffi.satora_sdk_ffi.ArkadeBalance;
 using SdkLightningDestination = uniffi.satora_sdk_ffi.LightningDestination;
@@ -34,13 +32,15 @@ public class SatoraWithdrawalTests
     private readonly RecordingRenewals _renewals = new();
     private readonly TestWithdrawalService _service;
 
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
     public SatoraWithdrawalTests()
     {
         _swaps = new MemoryOutgoingSwaps(_events);
         _wallet = new FakeWallet(_events) { Create = _ => FakeWallet.ArkadeToLightning("swap"), LightningQuote = Quote };
         _withdrawals = new MemoryWithdrawals(_events, _swaps);
         _wallets = new FakeWalletAccess(_wallet, _events);
-        _service = new TestWithdrawalService(_events, _wallets, _withdrawals,
+        _service = new TestWithdrawalService(_events, _wallets, _withdrawals, new MemoryAutoWithdrawRules(),
             new SatoraLightningPayments(_swaps, _wallets, _renewals, _paymentsLog), _renewals, _swaps, _log);
     }
 
@@ -183,15 +183,15 @@ public class SatoraWithdrawalTests
         await Execute(Ark, "0.00001", key: "ark");
         await Execute(OnChain, null, sendAll: true, maxFeeSats: 200, key: "exit");
         _wallet.Balance = new ArkadeBalance(100_000, 0, 5_000);
-        var settle = await _service.SettleAsync(Store);
+        var settle = await _service.SettleAsync(Store, cancellationToken: Ct);
         await Execute("alice@example.com", "0.00012345", maxTotalSats: 12_400, key: "ln");
 
         Assert.Equal("The wallet's recoverable funds were settled in Arkade batch commitment.", settle.Message);
         Assert.Equal([
-                $"Arkade withdrawal ark from the Satora wallet of store store sent 1000 sats with a fee of 0 sats to {Ark} in ark-send",
-                $"Bitcoin on-chain withdrawal exit from the Satora wallet of store store sent 50000 sats with a fee of 200 sats to {OnChain} in commitment-offboard",
-                "Settled the recoverable funds of the Satora wallet of store store in Arkade batch commitment",
-                $"Lightning address withdrawal ln from the Satora wallet of store store pays 12345 sats with fees of 55 sats to the invoice with payment hash {SatoraLightningCreditTests.PaymentHash}, which alice@example.com issued, through Satora swap swap"
+                $"Manual Arkade withdrawal ark from the Satora wallet of store store sent 1000 sats with a fee of 0 sats to {Ark} in ark-send",
+                $"Manual Bitcoin on-chain withdrawal exit from the Satora wallet of store store sent 50000 sats with a fee of 200 sats to {OnChain} in commitment-offboard",
+                "Settled the recoverable funds of the Satora wallet of store store in Arkade batch commitment, as asked on the withdrawals page",
+                $"Manual Lightning address withdrawal ln from the Satora wallet of store store pays 12345 sats with fees of 55 sats to the invoice with payment hash {SatoraLightningCreditTests.PaymentHash}, which alice@example.com issued, through Satora swap swap"
             ],
             _log.Entries.Where(e => e.Level == LogLevel.Information).Select(e => e.Message));
         Assert.Equal(["Funded Satora Lightning swap swap of store store in ark-swap"],
@@ -654,9 +654,9 @@ public class SatoraWithdrawalTests
         Assert.True(_withdrawals.Rows["key"] is { Status: SatoraWithdrawalStatus.Failed, SwapId: null });
     }
 
-    // A withdrawal asks the payee holding the store's spend lock, so the payee gets one timeout for all
-    // the requests of a lookup. A pay request answered just as that timeout runs out leaves the invoice
-    // request no time of its own.
+    // An automatic run asks the payee holding the store's spend lock, so the payee gets one timeout for
+    // all the requests of a lookup. A pay request answered just as that timeout runs out leaves the
+    // invoice request no time of its own.
     [Fact]
     public async Task ALightningAddressGetsOneTimeoutForAllTheRequestsOfALookup()
     {
@@ -929,19 +929,45 @@ public class SatoraWithdrawalTests
     }
 
     [Fact]
-    public async Task SettlesRecoverableFundsOnlyWhileNoWithdrawalIsUnresolved()
+    public async Task TheOwnerSettlesRecoverableFundsOnlyWhileNoWithdrawalIsUnresolved()
     {
         _wallet.Balance = new ArkadeBalance(90_000, 0, 10_200);
         _withdrawals.Rows["earlier"] = Row("earlier", SatoraWithdrawalStatus.Unknown, DateTimeOffset.UtcNow);
 
-        Assert.Equal((false, SatoraWithdrawalService.UnresolvedMessage), await _service.SettleAsync(Store));
+        Assert.Equal(new SatoraSettleResult(SatoraSettleOutcome.Blocked, SatoraWithdrawalService.UnresolvedMessage), await _service.SettleAsync(Store, cancellationToken: Ct));
         Assert.Empty(_events.All);
 
         _withdrawals.Rows.Clear();
-        Assert.True((await _service.SettleAsync(Store)).Success);
+        Assert.Equal(SatoraSettleOutcome.Settled, (await _service.SettleAsync(Store, cancellationToken: Ct)).Outcome);
         Assert.Equal(["settle (gated)"], _events.All);
         Assert.Equal(new ArkadeBalance(100_200, 0, 0), _wallet.Balance);
-        Assert.Equal((true, "The wallet had no recoverable funds to settle."), await _service.SettleAsync(Store));
+        Assert.Equal(new SatoraSettleResult(SatoraSettleOutcome.NothingToSettle, "The wallet had no recoverable funds to settle."), await _service.SettleAsync(Store, cancellationToken: Ct));
+    }
+
+    // A settle spends only recoverable VTXOs and pays only the wallet, which changes nothing an
+    // unresolved withdrawal's outcome depends on, while recoverable funds left alone cross expiry.
+    [Fact]
+    public async Task TheWorkerSettlesWhileAWithdrawalIsUnresolved()
+    {
+        _wallet.Balance = new ArkadeBalance(90_000, 0, 10_200);
+        _withdrawals.Rows["earlier"] = Row("earlier", SatoraWithdrawalStatus.Unknown, DateTimeOffset.UtcNow);
+
+        Assert.Equal(SatoraSettleOutcome.Settled, (await _service.SettleAsync(Store, automatic: true, Ct)).Outcome);
+        Assert.Equal(["settle (gated)"], _events.All);
+        Assert.Equal(["Settled the recoverable funds of the Satora wallet of store store in Arkade batch commitment, automatically"],
+            _log.Entries.Where(e => e.Level == LogLevel.Information).Select(e => e.Message));
+    }
+
+    // The settle is a native call that nothing can interrupt.
+    [Fact]
+    public async Task TheWorkersSettleStartsNothingOnceBTCPayIsStopping()
+    {
+        _wallet.Balance = new ArkadeBalance(90_000, 0, 10_200);
+        using var stopping = new CancellationTokenSource();
+        await stopping.CancelAsync();
+
+        Assert.Equal(SatoraSettleOutcome.Blocked, (await _service.SettleAsync(Store, automatic: true, stopping.Token)).Outcome);
+        Assert.Empty(_events.All);
     }
 
     // Past its swap's attach a Lightning withdrawal is no longer unresolved, but its request still runs.
@@ -952,11 +978,12 @@ public class SatoraWithdrawalTests
         _wallet.FundGate = fund.Task;
         var execute = Execute("alice@example.com", "0.00012345", maxTotalSats: 12_400);
 
-        Assert.False((await _service.SettleAsync(Store)).Success);
+        Assert.Equal(SatoraSettleOutcome.Blocked, (await _service.SettleAsync(Store, cancellationToken: Ct)).Outcome);
+        Assert.Equal(SatoraSettleOutcome.Blocked, (await _service.SettleAsync(Store, automatic: true, Ct)).Outcome);
         Assert.DoesNotContain(_events.All, e => e.StartsWith("settle", StringComparison.Ordinal));
         fund.SetResult();
         Assert.Equal(SatoraWithdrawResultKind.Pending, (await execute).Kind);
-        Assert.True((await _service.SettleAsync(Store)).Success);
+        Assert.Equal(SatoraSettleOutcome.NothingToSettle, (await _service.SettleAsync(Store, cancellationToken: Ct)).Outcome);
         Assert.Single(_events.All, e => e.StartsWith("settle", StringComparison.Ordinal));
     }
 
@@ -966,23 +993,26 @@ public class SatoraWithdrawalTests
         _wallet.Balance = new ArkadeBalance(90_000, 0, 10_200);
         _wallet.SettleError = new SdkException(SdkErrorKind.Timeout, "batch timed out");
 
-        var (success, message) = await _service.SettleAsync(Store);
+        var result = await _service.SettleAsync(Store, cancellationToken: Ct);
 
-        Assert.False(success);
-        Assert.Contains("batch timed out", message);
+        Assert.Equal(SatoraSettleOutcome.Failed, result.Outcome);
+        Assert.Contains("batch timed out", result.Message);
     }
 
     // ark-client refuses to settle recoverable funds below dust; any other Transport error may have
     // left a batch running.
     [Theory]
-    [InlineData(SubDust, "The recoverable funds are too small to settle on their own. They can be settled once more funds become recoverable.")]
-    [InlineData("settle: Failed to join batch: connection reset", "Settling the wallet's recoverable funds failed (settle: Failed to join batch: connection reset). The balance shows whether the batch went through.")]
-    public async Task ASettleOfFundsBelowDustSaysTheyCanBeSettledLater(string error, string expected)
+    [InlineData(SubDust, SatoraSettleOutcome.TooSmall, "The recoverable funds are too small to settle on their own. They can be settled once more funds become recoverable.")]
+    [InlineData("settle: Failed to join batch: connection reset", SatoraSettleOutcome.Failed, "Settling the wallet's recoverable funds failed (settle: Failed to join batch: connection reset). The balance shows whether the batch went through.")]
+    public async Task ASettleOfFundsBelowDustSaysTheyCanBeSettledLater(string error, SatoraSettleOutcome outcome, string expected)
     {
         _wallet.Balance = new ArkadeBalance(90_000, 0, 200);
         _wallet.SettleError = new SdkException(SdkErrorKind.Transport, error);
 
-        Assert.Equal((false, expected), await _service.SettleAsync(Store));
+        var result = await _service.SettleAsync(Store, cancellationToken: Ct);
+
+        Assert.Equal((outcome, expected), (result.Outcome, result.Message));
+        Assert.Equal(outcome == SatoraSettleOutcome.Failed ? error : null, result.Error);
         Assert.Equal(["settle (gated)"], _events.All);
     }
 
@@ -994,7 +1024,7 @@ public class SatoraWithdrawalTests
         _wallet.Balance = new ArkadeBalance(90_000, 0, 200);
         _wallet.SettleError = new SdkException(SdkErrorKind.Transport, SubDust);
 
-        await _service.SettleAsync(Store);
+        await _service.SettleAsync(Store, cancellationToken: Ct);
 
         Assert.Equal([(LogLevel.Information,
                 $"The recoverable funds of the Satora wallet of store store are below dust, and are settled once more funds become recoverable ({SubDust})")],
@@ -1065,68 +1095,4 @@ public class SatoraWithdrawalTests
         CreatedAt = createdAt,
         UpdatedAt = createdAt
     };
-
-    private sealed class TestWithdrawalService(OutgoingEvents events, SatoraWalletAccess wallets, SatoraWithdrawals withdrawals,
-        SatoraLightningPayments payments, SatoraWalletRenewals renewals, SatoraOutgoingSwaps outgoing, ILogger<SatoraWithdrawalService>? logger = null)
-        : SatoraWithdrawalService(wallets, withdrawals, payments, renewals, outgoing, null!, null!, null!, null!, null!, logger ?? NullLogger<SatoraWithdrawalService>.Instance)
-    {
-        public List<string> Notified { get; } = [];
-
-        // What every Lightning address and LNURL in these tests answers.
-        public LNURLPayRequest PayRequest { get; } = new()
-        {
-            Callback = new Uri("https://example.com/lnurlp/alice/callback"),
-            MinSendable = LightMoney.Satoshis(1),
-            MaxSendable = LightMoney.Satoshis(1_000_000)
-        };
-
-        public string Invoice { get; set; } = SatoraLightningCreditTests.Bolt11;
-
-        // Answers each invoice request with an invoice for the amount asked, instead of Invoice.
-        public Func<long, string>? InvoiceFor { get; set; }
-
-        // Awaited by every Lightning address and LNURL lookup before it answers.
-        public Task PayRequestGate { get; set; } = Task.CompletedTask;
-
-        // Makes every pay request answer only once the lookup it is part of has timed out, as an
-        // endpoint whose answer arrives just as the timeout runs out.
-        public bool PayRequestAnswersAtTimeout { get; set; }
-
-        // Thrown by every Lightning address and LNURL lookup, as by an endpoint that cannot be reached.
-        public Exception? PayeeError { get; set; }
-
-        protected override TimeSpan LnurlTimeout => TimeSpan.FromMilliseconds(500);
-
-        protected override TimeSpan HeldReadTimeout => TimeSpan.FromMilliseconds(500);
-
-        public override string? Unavailable => null;
-
-        protected override Network Network => Network.Main;
-
-        protected override TimeSpan CloseWait => TimeSpan.FromMilliseconds(200);
-
-        public override Task<bool> HasAutomatedLightningPayoutsAsync(string storeId) => Task.FromResult(false);
-
-        protected override Task NotifyUnknownAsync(SatoraWithdrawal withdrawal)
-        {
-            Notified.Add(withdrawal.Id);
-            return Task.CompletedTask;
-        }
-
-        protected override async Task<LNURLPayRequest> FetchPayRequestAsync(Uri endpoint, CancellationToken cancellationToken)
-        {
-            events.Add($"lnurl {endpoint}");
-            await PayRequestGate.WaitAsync(cancellationToken);
-            if (PayRequestAnswersAtTimeout)
-                await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-            return PayeeError is null ? PayRequest : throw PayeeError;
-        }
-
-        protected override Task<string> RequestInvoiceAsync(LNURLPayRequest payRequest, LightMoney amount, Network network, CancellationToken cancellationToken)
-        {
-            events.Add($"lnurl invoice {amount.MilliSatoshi / 1000}");
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(InvoiceFor?.Invoke(amount.MilliSatoshi / 1000) ?? Invoice);
-        }
-    }
 }

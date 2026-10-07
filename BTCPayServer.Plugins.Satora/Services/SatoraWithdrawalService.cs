@@ -27,18 +27,52 @@ public enum SatoraWithdrawResultKind
     Failed
 }
 
-public sealed record SatoraWithdrawResult(SatoraWithdrawResultKind Kind, string Message);
+// Error: for a Failed withdrawal, why nothing was sent.
+public sealed record SatoraWithdrawResult(SatoraWithdrawResultKind Kind, string Message, string? Error = null);
+
+public enum SatoraAutoWithdrawOutcome
+{
+    // Nothing to send yet, or the store has something to finish first: tried again on the next tick.
+    Waiting,
+    Sent,
+    // A Lightning payment on its way; SatoraOutgoingWorker records how it ends.
+    Pending,
+    // Its row holds up every withdrawal until the owner marks it, as for a manual withdrawal.
+    Unknown,
+    // Nothing was sent.
+    Failed
+}
+
+// Message: what happened, worded to follow the outcome in a log line or an alert.
+public sealed record SatoraAutoWithdrawResult(SatoraAutoWithdrawOutcome Outcome, string Message);
+
+public enum SatoraSettleOutcome
+{
+    Settled,
+    NothingToSettle,
+    // Below dust in total, which ark-client refuses to settle on its own.
+    TooSmall,
+    // Not tried: a withdrawal is running or unresolved, the network is not supported, or BTCPay is stopping.
+    Blocked,
+    // The balance shows whether a batch went through.
+    Failed
+}
+
+// Error: for a Failed settle, the SDK's reason.
+public sealed record SatoraSettleResult(SatoraSettleOutcome Outcome, string Message, string? Error = null);
 
 // A Lightning address's or LNURL's endpoint that did not answer: the payee's to fix, so a review tells
 // the store without logging it as a failure of the plugin.
 public sealed class SatoraPayeeException(string message, Exception? innerException = null) : InvalidOperationException(message, innerException);
 
-// Manual withdrawals from a store's wallet. Each attempt is recorded before any SDK call that could
-// move funds, under its review's idempotency key, and runs with the store's spend lock held, so no
-// two withdrawals of a store, nor a withdrawal and a seed replace, interleave.
+// Withdrawals from a store's wallet, by hand or by its automatic withdrawal rule. Each attempt is
+// recorded before any SDK call that could move funds, a manual one under its review's idempotency
+// key, and runs with the store's spend lock held, so no two withdrawals of a store, nor a withdrawal
+// and a seed replace, interleave.
 public class SatoraWithdrawalService(
     SatoraWalletAccess wallets,
     SatoraWithdrawals withdrawals,
+    SatoraAutoWithdrawRules rules,
     SatoraLightningPayments payments,
     SatoraWalletRenewals renewals,
     SatoraOutgoingSwaps outgoing,
@@ -59,6 +93,7 @@ public class SatoraWithdrawalService(
     public const string CloseConfirmationWord = "CLOSE";
     // arkd's dust (330 sats today): the least recoverable total ark-client settles.
     public const long DustSats = 330;
+    private const string Stopping = "BTCPay is stopping";
 
     // Withdrawals whose request is running in this process, with their store. BTCPay runs as one
     // process, so after a restart none is, whatever its row says.
@@ -161,7 +196,8 @@ public class SatoraWithdrawalService(
                             return Refuse(review, LightningRange(most.MinSats, most.MaxSats, most.Sats));
                         sats = most.Sats;
                     }
-                    var plan = await PlanLightningAsync(wallet, target, sats.Value, amountSats is null ? review.AvailableSats : null, network);
+                    var plan = await PlanLightningAsync(wallet, target, sats.Value, amountSats is null ? review.AvailableSats : null, network,
+                        capToMaxSendable: false);
                     var quote = plan.Quote;
                     if (quote.TargetAmountSats < quote.MinAmountSats || quote.TargetAmountSats > quote.MaxAmountSats)
                         return Refuse(review, LightningRange((long)quote.MinAmountSats, (long)quote.MaxAmountSats, (long)quote.TargetAmountSats));
@@ -225,7 +261,28 @@ public class SatoraWithdrawalService(
     }
 
     public Task<bool> ResolveAsync(string storeId, string id, bool sent) =>
-        withdrawals.ResolveAsync(storeId, id, sent, _running.ContainsKey(id), DateTimeOffset.UtcNow);
+        withdrawals.ResolveAsync(storeId, id, sent, IsRunning(id), DateTimeOffset.UtcNow);
+
+    public bool IsRunning(string withdrawalId) => _running.ContainsKey(withdrawalId);
+
+    // The store's automatic withdrawal. It waits for every withdrawal of the store still open and for
+    // every Lightning payment whose funding is unresolved, and is planned in full, quotes included,
+    // before its row is written, so a plan that fails leaves no row. From its row on it runs as a
+    // manual withdrawal does. No row is written once stoppingToken is cancelled: BTCPay is stopping,
+    // and the SDK call it would start cannot be interrupted.
+    public async Task<SatoraAutoWithdrawResult> ExecuteAutoAsync(string storeId, CancellationToken stoppingToken)
+    {
+        if (Network is not { } network)
+            return AutoResult(SatoraAutoWithdrawOutcome.Waiting, Unavailable ?? "Satora is not available on this server's network");
+        try
+        {
+            return await wallets.SpendAsync(storeId, wallet => ExecuteAutoGatedAsync(wallet, storeId, network, stoppingToken), stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return AutoResult(SatoraAutoWithdrawOutcome.Waiting, Stopping);
+        }
+    }
 
     // The store closes a Lightning payment the worker cannot finish, once the wallet's balance and the
     // payee have shown whether its invoice was paid. A withdrawal still running it decides first. The
@@ -296,35 +353,44 @@ public class SatoraWithdrawalService(
     }
 
     // Settles the wallet's recoverable funds, which no withdrawal spends, under the gates a withdrawal
-    // takes.
-    public async Task<(bool Success, string Message)> SettleAsync(string storeId)
+    // takes. An automatic settle runs while a withdrawal is unresolved too: a settle spends only
+    // recoverable VTXOs, which no send or exit spends, and pays only the wallet, so it changes nothing
+    // an unresolved withdrawal's outcome depends on. cancellationToken stops the wait for the spend
+    // lock, and once it holds the lock, the settle before it starts.
+    public async Task<SatoraSettleResult> SettleAsync(string storeId, bool automatic = false, CancellationToken cancellationToken = default)
     {
         if (Network is null)
-            return (false, Unavailable ?? "Satora is not available on this server's network.");
+            return new(SatoraSettleOutcome.Blocked, Unavailable ?? "Satora is not available on this server's network.");
         if (_running.Values.Contains(storeId))
-            return (false, "A withdrawal is still running. Settle once it has finished.");
+            return new(SatoraSettleOutcome.Blocked, "A withdrawal is still running. Settle once it has finished.");
         try
         {
-            return await wallets.SpendAsync<(bool, string)>(storeId, async wallet =>
+            return await wallets.SpendAsync(storeId, async wallet =>
             {
-                if ((await withdrawals.ListUnresolvedAsync(storeId)).Count > 0)
-                    return (false, UnresolvedMessage);
+                if (!automatic && (await withdrawals.ListUnresolvedAsync(storeId)).Count > 0)
+                    return new SatoraSettleResult(SatoraSettleOutcome.Blocked, UnresolvedMessage);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (await wallet.SettleArkadeAsync() is not { } batch)
-                    return (true, "The wallet had no recoverable funds to settle.");
-                logger.LogInformation("Settled the recoverable funds of the Satora wallet of store {StoreId} in Arkade batch {TxId}", storeId, batch);
-                return (true, $"The wallet's recoverable funds were settled in Arkade batch {batch}.");
-            });
+                    return new SatoraSettleResult(SatoraSettleOutcome.NothingToSettle, "The wallet had no recoverable funds to settle.");
+                logger.LogInformation("Settled the recoverable funds of the Satora wallet of store {StoreId} in Arkade batch {TxId}, {Origin}",
+                    storeId, batch, automatic ? "automatically" : "as asked on the withdrawals page");
+                return new SatoraSettleResult(SatoraSettleOutcome.Settled, $"The wallet's recoverable funds were settled in Arkade batch {batch}.");
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new(SatoraSettleOutcome.Blocked, "BTCPay is stopping.");
         }
         catch (SdkException e) when (TooSmallToSettle(e))
         {
             logger.LogInformation("The recoverable funds of the Satora wallet of store {StoreId} are below dust, and are settled once more funds become recoverable ({Reason})",
                 storeId, e.Message);
-            return (false, "The recoverable funds are too small to settle on their own. They can be settled once more funds become recoverable.");
+            return new(SatoraSettleOutcome.TooSmall, "The recoverable funds are too small to settle on their own. They can be settled once more funds become recoverable.");
         }
         catch (Exception e)
         {
             logger.LogWarning(e, "Settling the recoverable funds of the Satora wallet of store {StoreId} failed", storeId);
-            return (false, $"Settling the wallet's recoverable funds failed ({e.Message}). The balance shows whether the batch went through.");
+            return new(SatoraSettleOutcome.Failed, $"Settling the wallet's recoverable funds failed ({e.Message}). The balance shows whether the batch went through.", e.Message);
         }
     }
 
@@ -335,22 +401,10 @@ public class SatoraWithdrawalService(
             return Result(SatoraWithdrawResultKind.Replayed, "This withdrawal was already submitted; see its status below.");
         if ((await withdrawals.ListUnresolvedAsync(storeId)).Count > 0)
             return Result(SatoraWithdrawResultKind.Refused, UnresolvedMessage);
-        var now = DateTimeOffset.UtcNow;
-        var withdrawal = new SatoraWithdrawal
-        {
-            Id = key,
-            StoreId = storeId,
-            Type = target.Type,
-            Destination = target.Destination,
-            AmountSats = amountSats,
-            Status = SatoraWithdrawalStatus.Pending,
-            CreatedAt = now,
-            UpdatedAt = now
-        };
-        if (!await withdrawals.TryAddAsync(withdrawal))
-            return Result(SatoraWithdrawResultKind.Replayed, "This withdrawal was already submitted.");
-        _running.TryAdd(key, storeId);
-        try
+        var withdrawal = NewWithdrawal(key, storeId, SatoraWithdrawalOrigin.Manual, target, amountSats, null);
+        return await RecordAndRunAsync(withdrawal, SendAsync) ?? Result(SatoraWithdrawResultKind.Replayed, "This withdrawal was already submitted.");
+
+        async Task<SatoraWithdrawResult> SendAsync()
         {
             if (target.Type == SatoraWithdrawalType.Bitcoin)
                 return await OffboardAsync(wallet, withdrawal, amountSats, maxTotalSats, maxFeeSats);
@@ -367,15 +421,108 @@ public class SatoraWithdrawalService(
                 ? await SendArkadeAsync(wallet, withdrawal, amountSats ?? spendable, spendable)
                 : await PayLightningAsync(wallet, withdrawal, target, amountSats, spendable, maxTotalSats, maxFeeSats, network);
         }
-        finally
-        {
-            _running.TryRemove(key, out _);
-        }
     }
 
-    // What sends, swap fundings and exits spend. Recoverable sats move only when the owner settles
-    // them: ark-client counts VTXOs below dust as recoverable and refuses to settle a total below
-    // dust, so a withdrawal that settled first could be blocked for good by leftover change.
+    private async Task<SatoraAutoWithdrawResult> ExecuteAutoGatedAsync(ISatoraWallet wallet, string storeId, Network network, CancellationToken stoppingToken)
+    {
+        var rule = await rules.GetAsync(storeId);
+        if (rule is not { Enabled: true })
+            return AutoResult(SatoraAutoWithdrawOutcome.Waiting, "automatic withdrawal is off");
+        if (await withdrawals.HasOpenAsync(storeId))
+            return AutoResult(SatoraAutoWithdrawOutcome.Waiting, "another withdrawal has not finished yet");
+        // The inputs such a funding journaled still count as spendable, so what a send may take is not known.
+        if ((await outgoing.ListOpenAsync(storeId, CancellationToken.None)).Any(s => s is { FundingAttempted: true, FundingTxId: null }))
+            return AutoResult(SatoraAutoWithdrawOutcome.Waiting, "the funding of a Lightning payment is not resolved yet");
+        var target = SatoraWithdrawDestinations.Detect(rule.Destination, network, out var error);
+        if (target is null || target.Type == SatoraWithdrawalType.LightningInvoice)
+            return AutoResult(SatoraAutoWithdrawOutcome.Failed, error ?? "a Lightning invoice can be paid only once");
+        AutoPlan plan;
+        try
+        {
+            var (planned, stop) = await PlanAutoAsync(wallet, rule, target, network);
+            if (stop is not null)
+                return stop;
+            plan = planned!;
+        }
+        // The exit leaves out VTXOs about to expire and is refused while too little is left besides
+        // them, which a later tick, after a settle or new payments, can change.
+        catch (SdkException e) when (target.Type == SatoraWithdrawalType.Bitcoin && e.Kind == SdkErrorKind.InvalidSwap)
+        {
+            logger.LogInformation("The automatic exit of store {StoreId} cannot be quoted yet ({Reason}); trying again later", storeId, e.Message);
+            return AutoResult(SatoraAutoWithdrawOutcome.Waiting, $"the exit cannot be quoted yet ({e.Message})");
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "Planning the automatic withdrawal of store {StoreId} failed; nothing was sent", storeId);
+            return AutoResult(SatoraAutoWithdrawOutcome.Failed, e.Message);
+        }
+        if (stoppingToken.IsCancellationRequested)
+            return AutoResult(SatoraAutoWithdrawOutcome.Waiting, Stopping);
+        var withdrawal = NewWithdrawal(Guid.NewGuid().ToString("N"), storeId, SatoraWithdrawalOrigin.Auto, target, plan.AmountSats, plan.FeeSats);
+        var result = await RecordAndRunAsync(withdrawal, () => target.Type switch
+        {
+            SatoraWithdrawalType.Arkade => SendArkadeAsync(wallet, withdrawal, plan.SendSats!.Value, plan.Spendable),
+            SatoraWithdrawalType.Bitcoin => ExitAsync(wallet, withdrawal, plan.SendSats),
+            _ => PayLightningAsync(wallet, withdrawal, target, plan.SendSats, plan.Spendable, plan.BudgetSats, null, network, rule.MaxFeeBps, plan.Lightning)
+        });
+        return result?.Kind switch
+        {
+            SatoraWithdrawResultKind.Sent => AutoResult(SatoraAutoWithdrawOutcome.Sent, result.Message),
+            SatoraWithdrawResultKind.Pending => AutoResult(SatoraAutoWithdrawOutcome.Pending, result.Message),
+            SatoraWithdrawResultKind.Unknown => AutoResult(SatoraAutoWithdrawOutcome.Unknown, result.Message),
+            _ => AutoResult(SatoraAutoWithdrawOutcome.Failed, result?.Error ?? result?.Message ?? "its row could not be written")
+        };
+    }
+
+    // What an automatic run sends (SendSats, null for everything on chain), what its quote says the
+    // destination receives and the fee, out of Spendable, of which the run may take BudgetSats. For a
+    // Lightning address or LNURL, Lightning is the invoice its endpoint issued, which the run pays.
+    private sealed record AutoPlan(long? SendSats, long AmountSats, long FeeSats, long Spendable, long BudgetSats, LightningPlan? Lightning = null);
+
+    // A plan, or why there is none: Waiting below the threshold, Failed for a fee over the rule's cap.
+    private async Task<(AutoPlan? Plan, SatoraAutoWithdrawResult? Stop)> PlanAutoAsync(ISatoraWallet wallet, SatoraAutoWithdrawRule rule,
+        SatoraWithdrawTarget target, Network network)
+    {
+        var spendable = Spendable(await wallet.GetBalanceAsync());
+        if (spendable < rule.ThresholdSats)
+            return (null, AutoResult(SatoraAutoWithdrawOutcome.Waiting, $"the wallet can spend {spendable} sats, below the threshold of {rule.ThresholdSats} sats"));
+        var budget = spendable - rule.ReserveSats;
+        switch (target.Type)
+        {
+            case SatoraWithdrawalType.Arkade:
+                return (new AutoPlan(budget, budget, 0, spendable, budget), null);
+            case SatoraWithdrawalType.Bitcoin:
+                // Sending everything leaves out the VTXOs an exit cannot spend, and the dust it keeps as
+                // change, so the reserve is taken off what that would send.
+                var everything = await wallet.GetOffboardQuoteAsync(target.Destination, null);
+                if (rule.ReserveSats == 0)
+                    return FeeChecked(null, everything);
+                var amount = (long)everything.AmountSats - rule.ReserveSats;
+                if (amount <= 0)
+                    return (null, AutoResult(SatoraAutoWithdrawOutcome.Waiting,
+                        $"an exit could send {everything.AmountSats} sats now, which the reserve of {rule.ReserveSats} sats takes up"));
+                return FeeChecked(amount, await wallet.GetOffboardQuoteAsync(target.Destination, (ulong)amount));
+            default:
+                var most = await SendMaxAsync(wallet, budget);
+                var sats = Math.Min(most.Sats, most.MaxSats);
+                if (sats < most.MinSats)
+                    return (null, AutoResult(SatoraAutoWithdrawOutcome.Failed,
+                        $"the wallet can send {sats} sats above the reserve, below Satora's Lightning minimum of {most.MinSats} sats"));
+                var lightning = await PlanLightningAsync(wallet, target, sats, budget, network, capToMaxSendable: true);
+                return lightning.FeeSats > MaxFee(lightning.AmountSats, rule.MaxFeeBps)
+                    ? (null, OverFeeCap(lightning.FeeSats, lightning.AmountSats, rule.MaxFeeBps))
+                    : (new AutoPlan(lightning.AmountSats, lightning.AmountSats, lightning.FeeSats, spendable, budget, lightning), null);
+        }
+
+        (AutoPlan?, SatoraAutoWithdrawResult?) FeeChecked(long? amountSats, OffboardQuote quote) =>
+            (long)quote.FeeSats > MaxFee((long)quote.AmountSats, rule.MaxFeeBps)
+                ? (null, OverFeeCap((long)quote.FeeSats, (long)quote.AmountSats, rule.MaxFeeBps))
+                : (new AutoPlan(amountSats, (long)quote.AmountSats, (long)quote.FeeSats, spendable, budget), null);
+    }
+
+    // What sends, swap fundings and exits spend. Recoverable sats move only through a settle of their
+    // own: ark-client counts VTXOs below dust as recoverable and refuses to settle a total below dust,
+    // so a withdrawal that settled first could be blocked for good by leftover change.
     private static long Spendable(ArkadeBalance balance) => (long)(balance.confirmedSats + balance.preConfirmedSats);
 
     private async Task<SatoraWithdrawResult> SendArkadeAsync(ISatoraWallet wallet, SatoraWithdrawal withdrawal, long sats, long spendable)
@@ -420,6 +567,11 @@ public class SatoraWithdrawalService(
             return await FailAsync(withdrawal, $"The on-chain withdrawal now takes {total} sats from the wallet, more than the {maxTotalSats} sats reviewed.", null);
         if (amountSats is null && (long)quote.FeeSats > maxFeeSats)
             return await FailAsync(withdrawal, $"The on-chain fee is now {quote.FeeSats} sats, more than the {maxFeeSats} sats reviewed.", null);
+        return await ExitAsync(wallet, withdrawal, amountSats);
+    }
+
+    private async Task<SatoraWithdrawResult> ExitAsync(ISatoraWallet wallet, SatoraWithdrawal withdrawal, long? amountSats)
+    {
         string txid;
         try
         {
@@ -433,15 +585,18 @@ public class SatoraWithdrawalService(
     }
 
     // The swap is recorded with the withdrawal; from its funding attempt on, SatoraOutgoingWorker
-    // finishes the withdrawal as it finishes any outgoing payment.
+    // finishes the withdrawal as it finishes any outgoing payment. An automatic run (maxFeeBps set)
+    // pays the invoice its plan resolved, and holds the fees to that share of what the invoice pays.
     private async Task<SatoraWithdrawResult> PayLightningAsync(ISatoraWallet wallet, SatoraWithdrawal withdrawal, SatoraWithdrawTarget target,
-        long? amountSats, long spendable, long? maxTotalSats, long? maxFeeSats, Network network)
+        long? amountSats, long spendable, long? maxTotalSats, long? maxFeeSats, Network network, int? maxFeeBps = null, LightningPlan? planned = null)
     {
         SatoraLightningSwap swap;
         long receive, fees;
         try
         {
-            var (bolt11, paymentHash) = await InvoiceAsync(wallet, target, amountSats, spendable, network);
+            var (bolt11, paymentHash) = planned is null
+                ? await InvoiceAsync(wallet, target, amountSats, spendable, network)
+                : (planned.Bolt11, planned.PaymentHash);
             swap = await UnfundedSwapAsync(withdrawal, target, paymentHash)
                    ?? await payments.CreateAsync(wallet, withdrawal.StoreId, new SdkLightningDestination.Invoice(bolt11), network, paymentHash,
                        created => withdrawals.AttachSwapAsync(withdrawal.Id, created));
@@ -454,8 +609,10 @@ public class SatoraWithdrawalService(
         {
             return await FailAsync(withdrawal, e.Message, e);
         }
-        if (amountSats is null && fees > maxFeeSats)
-            return await FailAsync(withdrawal, $"The Lightning payment's fees are now {fees} sats, more than the {maxFeeSats} sats reviewed.", null);
+        var maxFee = maxFeeBps is { } bps ? MaxFee(receive, bps) : amountSats is null ? maxFeeSats : null;
+        if (fees > maxFee)
+            return await FailAsync(withdrawal,
+                $"The Lightning payment's fees are now {fees} sats, more than the {maxFee} sats {(maxFeeBps is null ? "reviewed" : "the maximum fee allows")}.", null);
         if (target.Type == SatoraWithdrawalType.LightningInvoice)
             logger.LogInformation("{Withdrawal} {WithdrawalId} from the Satora wallet of store {StoreId} pays {AmountSats} sats with fees of {FeeSats} sats to the invoice with payment hash {PaymentHash} through Satora swap {SwapId}",
                 Describe(withdrawal), withdrawal.Id, withdrawal.StoreId, receive, fees, swap.PaymentHash, swap.SwapId);
@@ -517,13 +674,13 @@ public class SatoraWithdrawalService(
         if (amountSats is { } sats)
         {
             using var lookup = new CancellationTokenSource(LnurlTimeout);
-            var invoice = await InvoiceFromPayeeAsync(target, await PayRequestAsync(target, lookup.Token), sats, network, lookup.Token);
+            var invoice = await InvoiceFromPayeeAsync(target, await PayRequestAsync(target, lookup.Token), sats, network, capToMaxSendable: false, lookup.Token);
             return (invoice.Bolt11, invoice.PaymentHash);
         }
         var most = await SendMaxAsync(wallet, spendable);
         if (most.Sats < most.MinSats || most.Sats > most.MaxSats)
             throw new InvalidOperationException(LightningRange(most.MinSats, most.MaxSats, most.Sats));
-        var plan = await PlanLightningAsync(wallet, target, most.Sats, spendable, network);
+        var plan = await PlanLightningAsync(wallet, target, most.Sats, spendable, network, capToMaxSendable: false);
         return (plan.Bolt11, plan.PaymentHash);
     }
 
@@ -546,9 +703,10 @@ public class SatoraWithdrawalService(
     // The invoice paying sats and the swap server's quote for it. For a Lightning address or LNURL the
     // swap server sees only the invoice its endpoint issued. With budgetSats, an invoice whose fees take
     // the total past it, as when an amount-only quote underestimated the Lightning fee, is asked for
-    // once more, lower by the difference. One LnurlTimeout covers every request to the payee.
+    // once more, lower by the difference. One LnurlTimeout covers every request to the payee, as an
+    // automatic run makes them holding the store's spend lock.
     private async Task<LightningPlan> PlanLightningAsync(ISatoraWallet wallet, SatoraWithdrawTarget target, long sats, long? budgetSats,
-        Network network)
+        Network network, bool capToMaxSendable)
     {
         if (target.Type == SatoraWithdrawalType.LightningInvoice)
             return await QuoteAsync(target.Destination, target.PaymentHash!, sats);
@@ -567,7 +725,7 @@ public class SatoraWithdrawalService(
 
         async Task<LightningPlan> ResolveAsync(long amount)
         {
-            var invoice = await InvoiceFromPayeeAsync(target, payRequest, amount, network, lookup.Token);
+            var invoice = await InvoiceFromPayeeAsync(target, payRequest, amount, network, capToMaxSendable, lookup.Token);
             return await QuoteAsync(invoice.Bolt11, invoice.PaymentHash, invoice.Sats);
         }
 
@@ -588,10 +746,14 @@ public class SatoraWithdrawalService(
         return await AskPayeeAsync(target, lookup, cancellationToken => FetchPayRequestAsync(endpoint, cancellationToken));
     }
 
-    // An invoice for sats from the payee's endpoint.
+    // An invoice for sats from the payee's endpoint. With capToMaxSendable it asks for at most what
+    // the payee takes, as an automatic run sends what the wallet holds above its reserve and would
+    // otherwise pay nothing.
     private async Task<(string Bolt11, string PaymentHash, long Sats)> InvoiceFromPayeeAsync(SatoraWithdrawTarget target, LNURLPayRequest payRequest,
-        long sats, Network network, CancellationToken lookup)
+        long sats, Network network, bool capToMaxSendable, CancellationToken lookup)
     {
+        if (capToMaxSendable && LightMoney.Satoshis(sats) > payRequest.MaxSendable)
+            sats = Sats(payRequest.MaxSendable, up: false);
         var amount = LightMoney.Satoshis(sats);
         if (amount < payRequest.MinSendable || amount > payRequest.MaxSendable)
             throw new InvalidOperationException(
@@ -659,7 +821,7 @@ public class SatoraWithdrawalService(
     }
 
     private static string Describe(SatoraWithdrawal withdrawal) =>
-        $"{SatoraWithdrawDestinations.Display(withdrawal.Type)} withdrawal";
+        $"{(withdrawal.Origin == SatoraWithdrawalOrigin.Auto ? "Automatic" : "Manual")} {SatoraWithdrawDestinations.Display(withdrawal.Type)} withdrawal";
 
     private async Task<SatoraWithdrawResult> FailAsync(SatoraWithdrawal withdrawal, string message, Exception? error)
     {
@@ -668,7 +830,7 @@ public class SatoraWithdrawalService(
         else if (error is not null)
             logger.LogWarning(error, "Withdrawal {WithdrawalId} from the Satora wallet of store {StoreId} failed; nothing was sent", withdrawal.Id, withdrawal.StoreId);
         await withdrawals.SetOutcomeAsync(withdrawal.Id, SatoraWithdrawalStatus.Failed, null, message);
-        return Result(SatoraWithdrawResultKind.Failed, $"Nothing was sent: {message}");
+        return new SatoraWithdrawResult(SatoraWithdrawResultKind.Failed, $"Nothing was sent: {message}", message);
     }
 
     // The SDK refused a withdrawal the wallet cannot cover without its funds about to expire: they are
@@ -730,6 +892,51 @@ public class SatoraWithdrawalService(
     // an InvalidSwap that only its text tells apart.
     private static bool IsSwapRecordMissing(SdkException error) =>
         error.Kind == SdkErrorKind.InvalidSwap && error.Message.Contains("swap record missing", StringComparison.Ordinal);
+
+    // Writes the withdrawal's row, then sends with the withdrawal marked running. Null when its id was
+    // used before.
+    private async Task<SatoraWithdrawResult?> RecordAndRunAsync(SatoraWithdrawal withdrawal, Func<Task<SatoraWithdrawResult>> send)
+    {
+        if (!await withdrawals.TryAddAsync(withdrawal))
+            return null;
+        _running.TryAdd(withdrawal.Id, withdrawal.StoreId);
+        try
+        {
+            return await send();
+        }
+        finally
+        {
+            _running.TryRemove(withdrawal.Id, out _);
+        }
+    }
+
+    private static SatoraWithdrawal NewWithdrawal(string id, string storeId, SatoraWithdrawalOrigin origin, SatoraWithdrawTarget target,
+        long? amountSats, long? feeSats)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return new SatoraWithdrawal
+        {
+            Id = id,
+            StoreId = storeId,
+            Origin = origin,
+            Type = target.Type,
+            Destination = target.Destination,
+            AmountSats = amountSats,
+            FeeSats = feeSats,
+            Status = SatoraWithdrawalStatus.Pending,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+    }
+
+    // In decimal: sats times basis points can pass a long's range.
+    private static long MaxFee(long amountSats, int maxFeeBps) => (long)(amountSats * (decimal)maxFeeBps / 10_000m);
+
+    private static SatoraAutoWithdrawResult OverFeeCap(long feeSats, long amountSats, int maxFeeBps) =>
+        AutoResult(SatoraAutoWithdrawOutcome.Failed,
+            $"the fee of {feeSats} sats is more than the maximum fee of {MaxFee(amountSats, maxFeeBps)} sats, {maxFeeBps / 100m:0.##}% of {amountSats} sats");
+
+    private static SatoraAutoWithdrawResult AutoResult(SatoraAutoWithdrawOutcome outcome, string message) => new(outcome, message);
 
     private static SatoraWithdrawReview Refuse(SatoraWithdrawReview review, string error)
     {
