@@ -178,7 +178,7 @@ public class SatoraWalletService(
         await using var ctx = dbContextFactory.CreateContext();
         var open = await OpenOperationsAsync(ctx, storeId);
         return await open.Swaps.CountAsync() + await open.LightningSwaps.CountAsync() + await open.Withdrawals.CountAsync() +
-               await open.ChainSwaps.CountAsync();
+               await open.ChainSwaps.CountAsync() + await open.StableSwaps.CountAsync();
     }
 
     // What CountOpenOperationsAsync counts, for the store to find: swaps that pay an invoice by their
@@ -203,6 +203,10 @@ public class SatoraWalletService(
             await open.ChainSwaps.Where(s => s.NeedsRefundAt == null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
         Add("refunds on the On-chain refunds page for invoices",
             await open.ChainSwaps.Where(s => s.NeedsRefundAt != null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
+        Add("stablecoin swaps of invoices",
+            await open.StableSwaps.Where(s => s.NeedsAttentionAt == null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
+        Add("stablecoin deposits to send back for invoices",
+            await open.StableSwaps.Where(s => s.NeedsAttentionAt != null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
         Add("withdrawals to mark sent or failed on the withdrawals page",
             await open.Withdrawals.OrderBy(w => w.CreatedAt).Select(w => w.Id).ToListAsync());
         Add("swaps of an earlier plugin version", await open.Swaps.OrderBy(t => t.DateT).Select(t => t.TxID).ToListAsync());
@@ -220,7 +224,8 @@ public class SatoraWalletService(
         IQueryable<SatoraTx> Swaps,
         IQueryable<SatoraLightningSwap> LightningSwaps,
         IQueryable<SatoraWithdrawal> Withdrawals,
-        IQueryable<SatoraChainSwap> ChainSwaps);
+        IQueryable<SatoraChainSwap> ChainSwaps,
+        IQueryable<SatoraStableSwap> StableSwaps);
 
     private static async Task<OpenOperations> OpenOperationsAsync(SatoraPluginDbContext ctx, string storeId)
     {
@@ -234,6 +239,8 @@ public class SatoraWalletService(
         var withdrawals = SatoraWithdrawals.Unresolved(ctx.SatoraWithdrawals.Where(w => w.StoreId == storeId));
         // Open on-chain swaps include those waiting for a refund, which only this seed can sign.
         var chainSwaps = ctx.SatoraChainSwaps.Where(s => s.StoreId == storeId && s.CompletedAt == null);
+        // Open stablecoin swaps include those waiting for a sweep, whose tokens only this seed can move.
+        var stableSwaps = ctx.SatoraStableSwaps.Where(s => s.StoreId == storeId && s.CompletedAt == null);
         if (walletCreated is { } created)
         {
             var since = created.UtcDateTime;
@@ -241,8 +248,9 @@ public class SatoraWalletService(
             lightningSwaps = lightningSwaps.Where(s => s.CreatedAt >= created);
             withdrawals = withdrawals.Where(w => w.CreatedAt >= created);
             chainSwaps = chainSwaps.Where(s => s.CreatedAt >= created);
+            stableSwaps = stableSwaps.Where(s => s.CreatedAt >= created);
         }
-        return new OpenOperations(swaps, lightningSwaps, withdrawals, chainSwaps);
+        return new OpenOperations(swaps, lightningSwaps, withdrawals, chainSwaps, stableSwaps);
     }
 
     private async Task<SeedWriteRefusal> WriteSeedAsync(string storeId, string mnemonic, SeedWriteKind kind, string? confirmation)
