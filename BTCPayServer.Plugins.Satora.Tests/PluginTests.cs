@@ -45,7 +45,7 @@ public class PluginTests
     }
 
     [Fact]
-    public void RegistersTheNavTheMigrationsAndOnlyTheOnChainCheckout()
+    public void RegistersTheNavTheMigrationsAndOnlyTheSatoraCheckoutBodies()
     {
         var services = new ServiceCollection();
         new Plugin().Execute(services);
@@ -56,7 +56,8 @@ public class PluginTests
             .Select(d => d.ImplementationType).ToList();
 
         Assert.Contains(extensions, e => e.Location == "store-wallets-nav");
-        Assert.Equal(["checkout-end"], extensions.Where(e => e.Location.StartsWith("checkout", StringComparison.Ordinal)).Select(e => e.Location));
+        Assert.Equal([("checkout-end", "SatoraChain/SatoraChainMethodCheckout"), ("checkout-end", "SatoraStable/SatoraStableMethodCheckout")],
+            extensions.Where(e => e.Location.StartsWith("checkout", StringComparison.Ordinal)).Select(e => (e.Location, e.Partial)));
         Assert.Contains(typeof(PluginMigrationRunner), hostedServices);
     }
 
@@ -91,17 +92,10 @@ public class PluginTests
         var services = new ServiceCollection();
         new Plugin().Execute(services);
 
-        foreach (var type in new[] { typeof(IPaymentLinkExtension), typeof(ICheckoutModelExtension) })
-            Assert.Single(services, d => d.ServiceType == type);
         Assert.Contains(services, d => d.ServiceType == typeof(SatoraChainPaymentHandler));
         Assert.Contains(new PrettyNameProvider.UntranslatedPrettyName(SatoraChainPaymentMethod.Id, "Bitcoin (Satora)"), PrettyNames(services));
-        foreach (var location in new[] { "checkout-end", "store-invoices-payments" })
-        {
-            var extension = Assert.Single(services.Select(d => d.ImplementationInstance).OfType<IUIExtension>(), e => e.Location == location);
-            // The partial resolves to a view compiled into the plugin.
-            Assert.Contains(typeof(Plugin).Assembly.GetCustomAttributes<RazorCompiledItemAttribute>(),
-                v => v.Identifier == $"/Views/Shared/{extension.Partial}.cshtml");
-        }
+        AssertCompiledPartial(services, "checkout-end", "SatoraChain/SatoraChainMethodCheckout");
+        AssertCompiledPartial(services, "store-invoices-payments", "SatoraChain/ViewSatoraChainPaymentData");
         Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraChainWorker));
         Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraChainPromptRenewer));
         foreach (var dependency in new[] { typeof(SatoraChainWorker), typeof(SatoraChainPaymentHandler), typeof(SatoraChainPromptRenewer), typeof(SatoraChainWallets) }
@@ -120,11 +114,22 @@ public class PluginTests
         foreach (var coin in SatoraStablePaymentMethod.All)
             Assert.Contains(new PrettyNameProvider.UntranslatedPrettyName(coin.Id, coin.PrettyName), PrettyNames(services));
         Assert.Equal(["USDC on Arbitrum (Satora)"], SatoraStablePaymentMethod.All.Select(c => c.PrettyName));
+        // A link and a checkout body for each method, the on-chain one's included.
+        foreach (var type in new[] { typeof(IPaymentLinkExtension), typeof(ICheckoutModelExtension) })
+            Assert.Equal(1 + SatoraStablePaymentMethod.All.Count, services.Count(d => d.ServiceType == type));
+        AssertCompiledPartial(services, "checkout-end", "SatoraStable/SatoraStableMethodCheckout");
         // The coin is passed to each handler; everything else comes from the container.
         foreach (var dependency in new[] { typeof(SatoraStablePaymentHandler), typeof(SatoraWalletService), typeof(SatoraPluginController) }
                      .SelectMany(t => t.GetConstructors().Single().GetParameters().Select(p => p.ParameterType))
                      .Where(t => t.Assembly == typeof(Plugin).Assembly && t != typeof(SatoraStablecoin)))
             Assert.Contains(services, d => d.ServiceType == dependency);
+    }
+
+    // The partial resolves to a view compiled into the plugin.
+    private static void AssertCompiledPartial(ServiceCollection services, string location, string partial)
+    {
+        Assert.Single(services.Select(d => d.ImplementationInstance).OfType<IUIExtension>(), e => e.Location == location && e.Partial == partial);
+        Assert.Contains(typeof(Plugin).Assembly.GetCustomAttributes<RazorCompiledItemAttribute>(), v => v.Identifier == $"/Views/Shared/{partial}.cshtml");
     }
 
     private static List<PrettyNameProvider.UntranslatedPrettyName> PrettyNames(ServiceCollection services) =>
@@ -167,9 +172,6 @@ public class PluginTests
         var services = new ServiceCollection();
         new Plugin().Execute(services);
 
-        var extension = Assert.Single(services.Select(d => d.ImplementationInstance).OfType<IUIExtension>(), e => e.Location == "layout-banner");
-        Assert.Equal("SatoraPaymentMethodNames", extension.Partial);
-        Assert.Contains(typeof(Plugin).Assembly.GetCustomAttributes<RazorCompiledItemAttribute>(),
-            v => v.Identifier == $"/Views/Shared/{extension.Partial}.cshtml");
+        AssertCompiledPartial(services, "layout-banner", "SatoraPaymentMethodNames");
     }
 }

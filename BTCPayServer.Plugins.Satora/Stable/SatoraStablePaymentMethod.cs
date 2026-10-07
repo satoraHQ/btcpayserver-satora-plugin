@@ -1,4 +1,5 @@
 using BTCPayServer.Payments;
+using BTCPayServer.Services.Invoices;
 using SdkChainId = uniffi.satora_sdk_ffi.ChainId;
 using SdkTokenId = uniffi.satora_sdk_ffi.TokenId;
 
@@ -16,7 +17,11 @@ public sealed record SatoraStablecoin(
     SdkChainId SdkChain,
     SdkTokenId SdkToken,
     string Contract,
-    int Decimals);
+    int Decimals)
+{
+    // The plugin's embedded token icon, served by BTCPay from the plugin assembly.
+    public string Image => $"Resources/ico-satora/{Symbol}.webp";
+}
 
 public static class SatoraStablePaymentMethod
 {
@@ -59,6 +64,16 @@ public class SatoraStablePromptDetails
 
     // What the customer sends to the prompt's deposit address, in the token's smallest unit.
     public string Units { get; set; } = null!;
+
+    // What the swap pays into the wallet. The prompt shows its address only while this is what is due.
+    public long ReceiveSats { get; set; }
+
+    // What the deposit address held when the worker last read it, in the token's smallest unit; null
+    // before the first read.
+    public string? ReceivedUnits { get; set; }
+
+    // Read without the handler's serializer, as Newtonsoft matches the stored camelCase names anyway.
+    public static SatoraStablePromptDetails? Of(PaymentPrompt? prompt) => prompt?.Details?.ToObject<SatoraStablePromptDetails>();
 }
 
 public class SatoraStablePaymentData

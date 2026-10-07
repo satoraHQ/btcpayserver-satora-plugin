@@ -348,6 +348,15 @@ expiry is checked against the swap server's 12 hour window. Elsewhere it is
 checked against a swap the server made in the last hour, or without one,
 against the invoice's own swap.
 
+At checkout the method shows the network in large type (Arbitrum One only, not
+Ethereum, Base or any other network), the token amount, the deposit address and
+the token's contract. The QR code holds an EIP-681 payment link, or the plain
+address for exchange apps and wallets that read only an address. BTCPay's
+header still shows the amount due in bitcoin. Once part of the deposit arrives,
+checkout shows how much and asks for the rest. Once all of it arrives, checkout
+says so. After a partial payment through another method, checkout shows no
+address for an amount its swap would not pay.
+
 Set the store's payment tolerance a point or so above the floor the Satora page
 names. A payment can arrive short by up to the swap's fees, because the DEX
 swap that funds it only has to deliver the payout, and the swap server takes

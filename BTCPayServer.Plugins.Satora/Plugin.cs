@@ -73,11 +73,14 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddSingleton<SatoraStableSwaps>()
                 .AddSingleton<SatoraStableQuotes>()
                 .AddSingleton<SatoraStoreStableConfig>()
+                .AddUIExtension("checkout-end", "SatoraStable/SatoraStableMethodCheckout")
                 .AddSingleton<SatoraPluginService>();
         // One method per coin, as BTCPay registers one per network.
         foreach (var coin in SatoraStablePaymentMethod.All)
             services.AddDefaultPrettyName(coin.Id, coin.PrettyName)
-                    .AddSingleton<IPaymentMethodHandler>(s => ActivatorUtilities.CreateInstance<SatoraStablePaymentHandler>(s, coin, BitcoinNetwork(s)));
+                    .AddSingleton<IPaymentMethodHandler>(s => ActivatorUtilities.CreateInstance<SatoraStablePaymentHandler>(s, coin, BitcoinNetwork(s)))
+                    .AddSingleton<IPaymentLinkExtension>(_ => new SatoraStablePaymentLinkExtension(coin))
+                    .AddSingleton<ICheckoutModelExtension>(s => ActivatorUtilities.CreateInstance<SatoraStableCheckoutModelExtension>(s, coin));
     }
 
     private static BTCPayNetwork BitcoinNetwork(IServiceProvider services) =>

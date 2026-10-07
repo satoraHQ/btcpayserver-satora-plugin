@@ -80,7 +80,8 @@ public partial class SatoraStablePaymentHandler(
             Token = swap.Token,
             TokenAddress = swap.TokenAddress,
             Decimals = swap.Decimals,
-            Units = swap.SourceUnits
+            Units = swap.SourceUnits,
+            ReceiveSats = swap.ReceiveSats
         }, Serializer);
     }
 

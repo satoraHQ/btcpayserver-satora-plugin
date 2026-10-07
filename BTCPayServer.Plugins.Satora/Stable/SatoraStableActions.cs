@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
 using NBitcoin;
@@ -83,4 +84,17 @@ public static class SatoraStableActions
 
     public static bool TryParseUnits(string? units, out decimal value) =>
         decimal.TryParse(units, NumberStyles.None, CultureInfo.InvariantCulture, out value) && value > 0;
+
+    // A token amount in its smallest unit as the SDK writes it, a decimal integer, zero included.
+    public static BigInteger? Units(string? units) =>
+        BigInteger.TryParse(units, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ? value : null;
+
+    // In whole tokens with every decimal the token has, as the customer has to send it.
+    public static string FormatUnits(BigInteger units, int decimals)
+    {
+        var whole = BigInteger.DivRem(units, BigInteger.Pow(10, decimals), out var fraction);
+        return decimals == 0
+            ? whole.ToString(CultureInfo.InvariantCulture)
+            : $"{whole.ToString(CultureInfo.InvariantCulture)}.{fraction.ToString(CultureInfo.InvariantCulture).PadLeft(decimals, '0')}";
+    }
 }

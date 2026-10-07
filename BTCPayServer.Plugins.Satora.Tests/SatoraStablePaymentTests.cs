@@ -79,8 +79,8 @@ public class SatoraStablePaymentTests
         Assert.Equal(swap.DepositAddress, context.Prompt.Destination);
         Assert.Equal([swap.DepositAddress], context.TrackedDestinations);
         var details = handler.ParsePaymentPromptDetails(context.Prompt.Details);
-        Assert.Equal((swap.SwapId, 42161L, "USDC", Usdc.Contract, 6, swap.SourceUnits),
-            (details.SwapId, details.ChainId, details.Token, details.TokenAddress, details.Decimals, details.Units));
+        Assert.Equal((swap.SwapId, 42161L, "USDC", Usdc.Contract, 6, swap.SourceUnits, DueSats, null),
+            (details.SwapId, details.ChainId, details.Token, details.TokenAddress, details.Decimals, details.Units, details.ReceiveSats, details.ReceivedUnits));
         Assert.Equal(invoice.ExpirationTime, swap.InvoiceExpiresAt);
         // The swap pays exactly what is due; the customer's token amount carries its fees.
         invoice.SetPaymentPrompt(Usdc.Id, context.Prompt);
@@ -426,7 +426,7 @@ public class SatoraStablePaymentTests
     }
 
     // Without the store's config, as for a method the store stopped offering after the invoice was made.
-    private static async Task<PaymentMethodContext> Configure(IPaymentMethodHandler handler, InvoiceEntity invoice, bool offered = true)
+    internal static async Task<PaymentMethodContext> Configure(IPaymentMethodHandler handler, InvoiceEntity invoice, bool offered = true)
     {
         var context = new PaymentMethodContext(new StoreData { Id = "store" }, new StoreBlob(), offered ? new JObject() : null!, handler, invoice, new InvoiceLogs());
         await handler.BeforeFetchingRates(context);

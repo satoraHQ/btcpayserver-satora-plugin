@@ -1,0 +1,73 @@
+@using BTCPayServer.Abstractions.Services
+@using BTCPayServer.Plugins.Satora.Stable
+@inject Safe Safe
+@model BTCPayServer.Models.InvoicingModels.CheckoutModel
+
+@* Shaped after SatoraChainMethodCheckout.cshtml. Exchange apps and many wallets read only a plain
+   address, so the QR code can show that instead of the EIP-681 link. *@
+<template id="@SatoraStableCheckoutModelExtension.CheckoutBodyComponentName">
+    <div class="payment-box">
+        <div v-if="stable" class="alert alert-warning text-center fw-semibold fs-5 mb-3" id="SatoraStableNetwork">
+            Send {{ stable.symbol }} on {{ stable.network }} only, not on Ethereum, Base or any other network.
+        </div>
+        <template v-if="stable && stable.converting">
+            <p class="text-center mb-0" id="SatoraStableConverting">Your {{ stable.amount }} {{ stable.symbol }} has arrived. The payment usually completes within a minute or two.</p>
+        </template>
+        <template v-else-if="stable && model.address">
+            <div v-if="qrValue" class="qr-container clipboard-button" :data-qr-value="qrValue" :data-clipboard="qrValue" data-clipboard-confirm-element="#SatoraStableAddress [data-clipboard]">
+                <div>
+                    <qrcode :value="qrValue" tag="div" :options="qrOptions" />
+                </div>
+                <img class="qr-icon" :src="model.cryptoImage" :alt="model.paymentMethodName"/>
+            </div>
+            <div v-if="model.invoiceBitcoinUrl" class="btn-group w-100 mt-3" role="group">
+                <button type="button" class="btn btn-sm" :class="plainAddress ? 'btn-outline-secondary' : 'btn-secondary'" v-on:click="plainAddress = false" id="SatoraStableQrLink">Payment link</button>
+                <button type="button" class="btn btn-sm" :class="plainAddress ? 'btn-secondary' : 'btn-outline-secondary'" v-on:click="plainAddress = true" id="SatoraStableQrAddress">Address only</button>
+            </div>
+            <div class="input-group mt-3">
+                <div class="form-floating" id="SatoraStableAmount">
+                    <div class="form-control-plaintext clipboard-button" :data-clipboard="stable.toSend" v-text="`${stable.toSend} ${stable.symbol}`"></div>
+                    <label>Amount</label>
+                </div>
+            </div>
+            <p v-if="stable.received" class="text-secondary small mt-2 mb-0" id="SatoraStableReceived">Received {{ stable.received }} of {{ stable.amount }} {{ stable.symbol }}. Send {{ stable.toSend }} more.</p>
+            <div class="input-group mt-3">
+                <div class="form-floating" id="SatoraStableAddress">
+                    <vc:truncate-center text="model.address" is-vue="true" padding="15" elastic="true" classes="form-control-plaintext" />
+                    <label>Address</label>
+                </div>
+            </div>
+            <div class="input-group mt-3">
+                <div class="form-floating" id="SatoraStableContract">
+                    <vc:truncate-center text="stable.contract" is-vue="true" padding="15" elastic="true" classes="form-control-plaintext" />
+                    <label>{{ stable.symbol }} contract</label>
+                </div>
+            </div>
+            <p class="text-secondary small mt-3 mb-0">Send exactly this amount of {{ stable.symbol }} from any wallet or exchange.</p>
+            <a v-if="model.invoiceBitcoinUrl && model.showPayInWalletButton" class="btn btn-primary rounded-pill w-100 mt-4" id="PayInWallet" target="_blank"
+               :href="model.invoiceBitcoinUrl" v-t="'pay_in_wallet'"></a>
+        </template>
+        <p v-else class="text-secondary small mt-3 mb-0">A new address for the amount due is on its way. Reload the page in a moment, or pick another payment method.</p>
+    </div>
+</template>
+
+<script>
+    Vue.component(@Safe.Json(SatoraStableCheckoutModelExtension.CheckoutBodyComponentName), {
+        props: ['model', 'nfcSupported', 'nfcScanning', 'nfcErrorMessage', 'nfcWarningMessage'],
+        template: @Safe.Json("#" + SatoraStableCheckoutModelExtension.CheckoutBodyComponentName),
+        components: {
+            qrcode: VueQrcode
+        },
+        data () {
+            return { plainAddress: false };
+        },
+        computed: {
+            stable () {
+                return this.model[@Safe.Json(SatoraStableCheckoutModelExtension.ModelKey)];
+            },
+            qrValue () {
+                return this.plainAddress || !this.model.invoiceBitcoinUrlQR ? this.model.address : this.model.invoiceBitcoinUrlQR;
+            }
+        }
+    });
+</script>
