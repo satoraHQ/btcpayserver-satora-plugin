@@ -53,6 +53,7 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddHostedService<SatoraOutgoingWorker>()
                 .AddSingleton<INotificationHandler, SatoraLightningNotification.Handler>()
                 .AddSingleton<INotificationHandler, SatoraWithdrawalNotification.Handler>()
+                .AddSingleton<INotificationHandler, SatoraWalletNotification.Handler>()
                 .AddSingleton<SatoraChainSwaps>()
                 .AddSingleton<SatoraChainWallets>()
                 .AddSingleton<SatoraChainCredit>()
