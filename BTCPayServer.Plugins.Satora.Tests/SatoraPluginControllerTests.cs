@@ -161,7 +161,7 @@ public class SatoraPluginControllerTests
     }
 
     // A wallet whose seed cannot be read, so ViewSeed redirects back to the settings page.
-    private sealed class RecordingWalletService() : SatoraWalletService(null!, null!, null!, null!, null!, null!, NullLogger<SatoraWalletService>.Instance)
+    private sealed class RecordingWalletService() : SatoraWalletService(null!, null!, null!, null!, null!, null!, null!, NullLogger<SatoraWalletService>.Instance)
     {
         public List<string> StatusReads { get; } = [];
 

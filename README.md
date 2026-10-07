@@ -12,7 +12,8 @@ The Satora page, under Wallets in the store's menu, sets up the store's Satora
 wallet, shows its balance and lists earlier swaps (see [Wallet](#wallet)).
 Lightning and on-chain payments land in the wallet (see [Lightning](#lightning)
 and [On-chain payments](#on-chain-payments)). The wallet pays out over
-Lightning, to Arkade and on chain (see [Withdrawals](#withdrawals)).
+Lightning, to Arkade and on chain, by hand or automatically above a threshold
+(see [Withdrawals](#withdrawals)).
 
 ## Requirements
 
@@ -399,11 +400,82 @@ are taken back from about an hour after the refund locktime. A payment cannot
 be closed while its withdrawal is running, or closed as failed while its VHTLC
 still holds funds or cannot be read.
 
+### Automatic withdrawal
+
+The withdrawals page can also withdraw automatically. Set a destination, a
+threshold, a reserve and a maximum fee. The destination is an Arkade address, a
+Lightning address or LNURL, or a Bitcoin address. A Lightning invoice cannot be
+used, as it can be paid only once. Once the wallet can spend the threshold, it
+sends what it can spend above the reserve.
+
+- To an Arkade address, it sends all of it, with no fee.
+- To a Bitcoin address, it sends a collaborative exit of everything less the
+  reserve, quoted again for that amount, or with no reserve an exit of
+  everything. The exit leaves out VTXOs about to expire and keeps the server's
+  dust as Arkade change. If the SDK refuses to quote the exit, for example
+  while too much of the balance is about to expire, it is tried again at the
+  next check and does not count as a failure.
+- To a Lightning address or LNURL, it sends what the swap server quotes for the
+  wallet's sats above the reserve, up to the route's maximum and what the
+  payee's endpoint accepts. The amount is worked out as for a manual withdrawal
+  of everything.
+
+The maximum fee is a share of what the destination receives, and a run whose
+fees would be higher sends nothing. Each store whose Satora wallet is enabled
+is checked every 5 minutes on mainnet and every 30 seconds on other networks.
+No run starts while another withdrawal of the store is open, automatic or
+manual, while the funding of a Lightning payment is unresolved, or while BTCPay
+is stopping. A Lightning withdrawal counts as open until it has finished. Each
+automatic withdrawal runs like a manual one, under the same spending lock, and
+is listed with an **Automatic** badge. A run that sends nothing, including a
+Lightning payment refunded to the wallet, is retried after 5 minutes, 15
+minutes, an hour and then every 6 hours, until one goes out or the rule is
+saved again. BTCPay notifies the store's owners and the server admins once two
+runs in a row have failed. A run cut short by a BTCPay restart is marked
+interrupted, like a manual withdrawal, and holds up every withdrawal until
+someone marks it sent or failed. BTCPay notifies the store about it once it is
+30 minutes old.
+
+Saving the rule checks only what does not depend on the balance, since the
+wallet is often empty then:
+
+- the destination is valid and is not the wallet's own Arkade address
+- a reserve, if set, is at least dust, because less would be left as change the
+  wallet cannot spend
+- the threshold is at least 330 sats above the reserve for an Arkade address,
+  or 860 sats for a Bitcoin address
+- a Lightning address or LNURL issues an invoice for what the threshold pays
+  above the reserve, and the swap server quotes it.
+
+Fees are checked against the maximum on each run. A saved destination applies
+at once, and BTCPay notifies the store's owners and the server admins of every
+new destination, the first included. Set a reserve if BTCPay's automated
+Lightning payout processor is on. Without one every run empties the wallet, and
+payouts and refunds find nothing to pay from. The withdrawals page warns about
+this.
+
+Automatic withdrawal and automatic settling stop while the store's Satora
+wallet is disabled. Replacing the wallet with a new seed turns automatic
+withdrawal off but keeps its settings. Restoring the same wallet leaves it on.
+
+VTXOs are not renewed before they expire. Funds turn recoverable when each
+VTXO expires, and are settled within minutes, as above.
+
+For a destination that is not always online, withdraw to a Lightning or Bitcoin
+address instead of an Arkade address. The VTXOs an Arkade withdrawal delivers,
+by hand or automatic, expire when the ones they were paid from would have,
+which can be minutes later (seconds on regtest, with 512 second VTXOs). A
+destination wallet that is not online to settle them by then depends on the
+Arkade server to get them back.
+
 ### Who can spend from the wallet
 
 Withdrawing needs permission to change the store's settings. It does not need
 hot wallet rights, so the wallet keeps working for its store if an admin later
-turns hot wallets off.
+turns hot wallets off. Setting up automatic withdrawal needs the same
+permission, so anyone who can withdraw by hand can also redirect the store's
+future income. BTCPay notifies the owners and the server admins of every new
+destination.
 
 As the store's Lightning node, the wallet also pays whatever BTCPay pays over
 Lightning, under BTCPay's own permissions. That covers payouts approved by
@@ -412,6 +484,32 @@ the Greenfield API with a key allowed to use the store's Lightning node. With
 an automated Lightning payout processor enabled for the store, approved payouts
 are paid without anyone opening the Satora page. The Satora pages warn while
 one is enabled.
+
+## Runbook
+
+### Alerts about automatic withdrawal and settling
+
+- **Automatic withdrawals now go to ...**: someone saved a new destination.
+  If no one who manages the store did, open the withdrawals page, click **Turn
+  automatic withdrawal off**, move the funds by hand if needed, and check who
+  can change the store's settings.
+- **Automatic withdrawals to ... failed twice in a row (...)**: nothing was
+  sent and the funds are in the wallet. The brackets give the reason. For a fee
+  over the maximum, raise the maximum fee or the threshold. For a Lightning
+  address or LNURL, check that it answers and accepts the amount. For a
+  Lightning payment the swap server could not complete and refunded, check that
+  the payee can receive that much over Lightning. BTCPay keeps retrying, at
+  most 6 hours apart, and saving the rule again retries at once.
+- **An automatic withdrawal to ... was interrupted**: BTCPay restarted while it
+  ran, and every withdrawal waits for it. Compare the wallet's balance and the
+  destination with what you expect, then on the withdrawals page click **Mark
+  as sent** or **Mark as failed**.
+- **Settling the recoverable funds ... failed twice in a row (...)**: the
+  Arkade server refused the batch or did not answer. Check that it is
+  reachable. BTCPay keeps retrying, at most 6 hours apart, and **Settle
+  recoverable funds** on the withdrawals page tries at once.
+- **The outcome of a withdrawal ... is unknown**: as for a manual withdrawal,
+  check the balance and mark it sent or failed.
 
 ## Support
 
