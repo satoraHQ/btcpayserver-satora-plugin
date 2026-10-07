@@ -16,6 +16,9 @@ public interface ISatoraWallet
 {
     Task<ArkadeBalance> GetBalanceAsync();
 
+    // The wallet's own Arkade address, read again rather than cached: arkd rotating its signer key changes it.
+    Task<string> GetArkadeAddressAsync();
+
     Task<string?> SettleArkadeAsync();
 
     // Renews the VTXOs about to expire that sends, swap fundings and exits leave out; returns the
@@ -68,6 +71,8 @@ public class SatoraWalletAccess(SatoraWalletRegistry registry)
         private SdkClient Client => wallet.Client;
 
         public Task<ArkadeBalance> GetBalanceAsync() => Client.GetArkadeBalanceAsync();
+
+        public Task<string> GetArkadeAddressAsync() => wallet.RefreshArkadeAddressAsync();
 
         public Task<string?> SettleArkadeAsync() => Client.SettleArkadeAsync();
 

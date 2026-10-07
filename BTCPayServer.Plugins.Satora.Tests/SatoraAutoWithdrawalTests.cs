@@ -288,6 +288,115 @@ public class SatoraAutoWithdrawalTests
         Assert.Single(_events.All, e => e.StartsWith("send", StringComparison.Ordinal));
     }
 
+    // The wallet is often empty when the rule is set up, and an exit's quote needs the funds it would spend.
+    [Fact]
+    public async Task SavesARuleOnAnEmptyWalletWithoutQuotingAnExit()
+    {
+        _wallet.Balance = new ArkadeBalance(0, 0, 0);
+
+        var (saved, _) = await Save(OnChain, "0.001", "0.0002", "0.5");
+
+        Assert.True(saved);
+        Assert.True(_rules.Rows[Store] is
+            { Enabled: true, DestinationType: SatoraWithdrawalType.Bitcoin, ThresholdSats: 100_000, ReserveSats: 20_000, MaxFeeBps: 50, Version: 1 });
+        Assert.Equal(OnChain, _rules.Rows[Store].Destination);
+        Assert.Equal([OnChain], _service.DestinationsNotified);
+        Assert.Empty(_events.All);
+    }
+
+    public static TheoryData<string, string, string?, string, string> Unsendable => new()
+    {
+        { SatoraLightningCreditTests.Bolt11, "0.001", null, "1", "can be paid only once" },
+        { "bitcoin:{0}?amount=0.001", "0.001", null, "1", "without an amount" },
+        // An exit sends at least dust, keeps dust as change and pays a flat fee.
+        { "{0}", "0.00001", "0.000005", "1", "at least 860 sats above the reserve" },
+        { Ark, "0.000003", null, "1", "at least 330 sats above the reserve" },
+        { Ark, "0.001", "0.002", "1", "at least 330 sats above the reserve" },
+        // The change a send leaves would be below dust, and recoverable rather than spendable.
+        { Ark, "0.001", "0.000001", "1", "reserve must be at least 330 sats" },
+        { Ark, "", null, "1", "Enter the threshold" },
+        { Ark, "0", null, "1", "Enter the threshold" },
+        { Ark, "0.001", "0,0005", "1", "Enter the reserve" },
+        { Ark, "0.001", null, "10.01", "from 0 to 10, with at most 2 decimals" },
+        { Ark, "0.001", null, "0.005", "from 0 to 10, with at most 2 decimals" },
+        { Ark, "0.001", null, "1,5", "from 0 to 10, with at most 2 decimals" }
+    };
+
+    [Theory]
+    [MemberData(nameof(Unsendable))]
+    public async Task RefusesARuleThatCouldNeverSend(string destination, string thresholdBtc, string? reserveBtc, string maxFeePercent, string says)
+    {
+        var (saved, message) = await Save(string.Format(destination, OnChain), thresholdBtc, reserveBtc, maxFeePercent);
+
+        Assert.False(saved);
+        Assert.Contains(says, message);
+        Assert.Empty(_rules.Rows);
+        Assert.Empty(_service.DestinationsNotified);
+    }
+
+    // Each run would send the wallet's funds back to itself.
+    [Fact]
+    public async Task RefusesTheWalletsOwnArkadeAddress()
+    {
+        _wallet.ArkadeAddress = Ark.ToUpperInvariant();
+
+        var (saved, message) = await Save(Ark, "0.001", null, "1");
+
+        Assert.False(saved);
+        Assert.Contains("own Arkade address", message);
+    }
+
+    // Neither the payee's invoice nor the swap server's quote depends on the wallet's balance.
+    [Fact]
+    public async Task ChecksALightningAddressAgainstItsEndpointAndTheSwapServersQuoteForWhatTheThresholdLeaves()
+    {
+        _wallet.Balance = new ArkadeBalance(0, 0, 0);
+        Assert.True((await Save(Alice, "0.001", "0.0002", "1")).Saved);
+        Assert.Equal(["send-max quote 80000", "lnurl https://example.com/.well-known/lnurlp/alice", "lnurl invoice 12345",
+            $"quote {new SdkLightningDestination.Invoice(SatoraLightningCreditTests.Bolt11)}"], _events.All);
+
+        _wallet.SendMaxQuote = _wallet.SendMaxQuote with { MinAmount = 20_000 };
+        var (belowMinimum, message) = await Save(Alice, "0.001", "0.0002", "1", version: 1);
+        _wallet.SendMaxQuote = _wallet.SendMaxQuote with { MinAmount = 1_000 };
+        _service.PayRequest.MinSendable = LightMoney.Satoshis(20_000);
+        var (refusedByPayee, payeeMessage) = await Save(Alice, "0.002", null, "1", version: 1);
+
+        Assert.False(belowMinimum);
+        Assert.Contains("minimum of 20000 sats", message);
+        Assert.False(refusedByPayee);
+        Assert.Contains("takes from 20000 to 1000000 sats, not 12345 sats", payeeMessage);
+        Assert.Equal(1, _rules.Rows[Store].Version);
+    }
+
+    // A new destination, the first included, could be a thief's; other changes cannot redirect funds.
+    [Fact]
+    public async Task TellsTheStoreOfEveryNewDestinationAndOfNothingElse()
+    {
+        Assert.True((await Save(Ark, "0.001", null, "1")).Saved);
+        Assert.True((await Save(Ark, "0.002", "0.0005", "2", version: 1)).Saved);
+        Assert.True((await Save(OnChain, "0.002", "0.0005", "2", version: 2)).Saved);
+        var (stale, message) = await Save(Ark, "0.002", "0.0005", "2", version: 2);
+        Assert.True(await _service.DisableAutoWithdrawAsync(Store));
+        Assert.False(await _service.DisableAutoWithdrawAsync(Store));
+        Assert.True(_rules.Rows[Store] is { Enabled: false, Version: 4 });
+        Assert.True((await Save(OnChain, "0.002", "0.0005", "2", version: 4)).Saved);
+
+        Assert.False(stale);
+        Assert.Contains("changed since this page was loaded", message);
+        Assert.Equal([Ark, OnChain], _service.DestinationsNotified);
+        Assert.True(_rules.Rows[Store] is { Enabled: true, Version: 5, ThresholdSats: 200_000, ReserveSats: 50_000, MaxFeeBps: 200 });
+    }
+
+    private Task<(bool Saved, string Message)> Save(string destination, string thresholdBtc, string? reserveBtc, string maxFeePercent, int? version = null) =>
+        _service.SaveAutoWithdrawAsync(Store, new SatoraAutoWithdrawRequest
+        {
+            Destination = destination,
+            ThresholdBtc = thresholdBtc,
+            ReserveBtc = reserveBtc,
+            MaxFeePercent = maxFeePercent,
+            Version = version
+        });
+
     private static SatoraWithdrawal Withdrawal(string id, SatoraWithdrawalStatus status, string? swapId = null) => new()
     {
         Id = id,

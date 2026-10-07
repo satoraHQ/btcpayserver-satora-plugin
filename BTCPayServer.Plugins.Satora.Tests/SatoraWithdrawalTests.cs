@@ -636,8 +636,8 @@ public class SatoraWithdrawalTests
         Assert.True(_withdrawals.Rows["key"] is { Status: SatoraWithdrawalStatus.Failed, SwapId: null });
     }
 
-    // The payee's server is the payee's to fix: the store is told whose server it was, and a review logs
-    // no warning for it.
+    // The payee's server is the payee's to fix: the store is told whose server it was, and a review or a
+    // rule save logs no warning for it.
     [Fact]
     public async Task ALightningAddressWhoseServerCannotBeReachedSaysSo()
     {
@@ -645,10 +645,13 @@ public class SatoraWithdrawalTests
         _service.PayeeError = new HttpRequestException("Connection refused (example.com:443)");
 
         var review = await Review("alice@example.com", "0.00012345");
+        var save = await _service.SaveAutoWithdrawAsync(Store,
+            new SatoraAutoWithdrawRequest { Destination = "alice@example.com", ThresholdBtc = "0.001", MaxFeePercent = "1" });
         var warnings = _log.Entries.Count(e => e.Level >= LogLevel.Warning);
         var result = await Execute("alice@example.com", "0.00012345", maxTotalSats: 12_400);
 
         Assert.Equal(unreachable, review.Error);
+        Assert.Equal((false, unreachable + " Nothing was saved."), save);
         Assert.Equal(0, warnings);
         Assert.Equal((SatoraWithdrawResultKind.Failed, "Nothing was sent: " + unreachable), (result.Kind, result.Message));
         Assert.True(_withdrawals.Rows["key"] is { Status: SatoraWithdrawalStatus.Failed, SwapId: null });

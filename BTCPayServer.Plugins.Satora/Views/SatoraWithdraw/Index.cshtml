@@ -10,6 +10,8 @@
     ViewData.SetLayoutModel(new LayoutModel(nameof(PluginNavPages.Index), "Satora withdrawals")
     { ActiveCategory = nameof(PluginNavPages) });
     string Btc(long? sats) => sats is { } s ? (s / 100_000_000m).ToString("0.00000000", CultureInfo.InvariantCulture) + " BTC" : "everything";
+    string BtcField(long sats) => (sats / 100_000_000m).ToString("0.########", CultureInfo.InvariantCulture);
+    string Percent(int bps) => (bps / 100m).ToString("0.##", CultureInfo.InvariantCulture);
     string Status(SatoraWithdrawal w) => w is { Status: SatoraWithdrawalStatus.Pending, SwapId: null }
         ? (Model.Running.Contains(w.Id) ? "Running" : "Interrupted")
         : w.Status.ToString();
@@ -34,7 +36,10 @@ else
     <partial name="_SatoraWalletBalance" model="Model.StoreId" />
     var recoverableSats = Model.Review?.RecoverableSats ?? 0;
     <form method="post" asp-action="Settle" asp-route-storeId="@Model.StoreId" class="mb-4 @(recoverableSats >= SatoraWithdrawalService.DustSats ? "" : "d-none")" data-satora-recoverable="settle">
-        <p class="mb-2">Recoverable funds cannot be withdrawn until they are settled. Settling can take a few minutes.</p>
+        <p class="mb-2">
+            Recoverable funds cannot be withdrawn until they are settled. The wallet settles them automatically within a few minutes.
+            To settle them now, use the button. That can take a few minutes too.
+        </p>
         <button type="submit" class="btn btn-outline-primary">Settle recoverable funds</button>
     </form>
     <p class="mb-4 @(recoverableSats is > 0 and < SatoraWithdrawalService.DustSats ? "" : "d-none")" data-satora-recoverable="dust">
@@ -165,6 +170,78 @@ else
             </div>
         }
     }
+
+    var rule = Model.AutoWithdraw;
+    var form = Model.AutoWithdrawForm;
+    <h4 class="mt-4">Automatic withdrawal</h4>
+    <p>
+        When the spendable balance reaches the threshold, everything above the reserve is sent to the destination. If the fees would be
+        more than the maximum fee, nothing is sent. BTCPay notifies the store's owners and the server admins of every new destination and
+        when automatic withdrawals keep failing.
+    </p>
+    <p class="form-text">
+        For a destination that is not always online, use a Lightning or Bitcoin address, as Arkade funds can expire within minutes.
+    </p>
+    <p class="form-text">Automatic withdrawal and settling stop while the wallet is disabled.</p>
+    @if (rule is { Enabled: true })
+    {
+        <div class="border rounded p-3 mb-3">
+            <div class="d-flex flex-wrap gap-4">
+                <div><div class="text-secondary small">Status</div><strong>On</strong></div>
+                <div><div class="text-secondary small">Destination type</div><strong>@SatoraWithdrawDestinations.Display(rule.DestinationType)</strong></div>
+                <div><div class="text-secondary small">Threshold</div><strong>@Btc(rule.ThresholdSats)</strong></div>
+                <div><div class="text-secondary small">Reserve</div><strong>@Btc(rule.ReserveSats)</strong></div>
+                <div><div class="text-secondary small">Maximum fee</div><strong>@Percent(rule.MaxFeeBps)%</strong></div>
+                <div><div class="text-secondary small">Changed</div><strong>@rule.UpdatedAt.ToString("u", CultureInfo.InvariantCulture)</strong></div>
+            </div>
+            <div class="mt-3">
+                <div class="text-secondary small">Destination</div>
+                <code class="text-break">@rule.Destination</code>
+            </div>
+            @if (Model.Unresolved.Any())
+            {
+                <p class="mt-3 mb-0 text-danger">No automatic withdrawal runs until the withdrawal above is marked sent or failed.</p>
+            }
+            <form method="post" asp-action="DisableAutoWithdraw" asp-route-storeId="@Model.StoreId" class="mt-3">
+                <button type="submit" class="btn btn-outline-danger">Turn automatic withdrawal off</button>
+            </form>
+        </div>
+        @if (rule.ReserveSats == 0 && Model.AutomatedLightningPayouts)
+        {
+            <div class="alert alert-warning">
+                With no reserve, each automatic withdrawal empties the wallet and leaves nothing for automated Lightning payouts and refunds.
+                Set a reserve to keep funds for them.
+            </div>
+        }
+    }
+    else
+    {
+        <p><strong>Off.</strong></p>
+    }
+    <form method="post" asp-action="SaveAutoWithdraw" asp-route-storeId="@Model.StoreId" class="mb-4">
+        <input type="hidden" name="Version" value="@rule?.Version" />
+        <div class="form-group">
+            <label for="AutoDestination" class="form-label">Destination</label>
+            <input id="AutoDestination" name="Destination" class="form-control" value="@(form?.Destination ?? rule?.Destination)" autocomplete="off" spellcheck="false" />
+            <div class="form-text">An Arkade address, Lightning address, LNURL or Bitcoin address.</div>
+        </div>
+        <div class="d-flex flex-wrap gap-3">
+            <div class="form-group">
+                <label for="ThresholdBtc" class="form-label">Threshold (BTC)</label>
+                <input id="ThresholdBtc" name="ThresholdBtc" class="form-control w-auto" value="@(form?.ThresholdBtc ?? (rule is null ? null : BtcField(rule.ThresholdSats)))" inputmode="decimal" autocomplete="off" />
+            </div>
+            <div class="form-group">
+                <label for="ReserveBtc" class="form-label">Reserve (BTC)</label>
+                <input id="ReserveBtc" name="ReserveBtc" class="form-control w-auto" value="@(form?.ReserveBtc ?? (rule is null ? null : BtcField(rule.ReserveSats)))" inputmode="decimal" autocomplete="off" />
+            </div>
+            <div class="form-group">
+                <label for="MaxFeePercent" class="form-label">Maximum fee (%)</label>
+                <input id="MaxFeePercent" name="MaxFeePercent" class="form-control w-auto" value="@(form?.MaxFeePercent ?? (rule is null ? "1" : Percent(rule.MaxFeeBps)))" inputmode="decimal" autocomplete="off" />
+            </div>
+        </div>
+        <div class="form-text mb-3">The reserve stays in the wallet for payouts and refunds. The maximum fee is a percentage of what the destination receives. Changes apply immediately.</div>
+        <button type="submit" class="btn btn-primary">Save and turn on</button>
+    </form>
 }
 
 @if (Model.Unfinished.Any())
@@ -237,7 +314,13 @@ else
                 {
                     <tr>
                         <td class="text-nowrap">@w.CreatedAt.ToString("u", CultureInfo.InvariantCulture)</td>
-                        <td class="text-nowrap">@SatoraWithdrawDestinations.Display(w.Type)</td>
+                        <td class="text-nowrap">
+                            @SatoraWithdrawDestinations.Display(w.Type)
+                            @if (w.Origin == SatoraWithdrawalOrigin.Auto)
+                            {
+                                <span class="badge bg-info ms-1">Automatic</span>
+                            }
+                        </td>
                         <td class="text-break"><code>@w.Destination</code></td>
                         <td class="text-nowrap text-end">@Btc(w.AmountSats)</td>
                         <td class="text-nowrap text-end">@(w.FeeSats is null ? "" : Btc(w.FeeSats))</td>

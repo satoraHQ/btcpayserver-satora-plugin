@@ -85,24 +85,18 @@ public static class SatoraWithdrawDestinations
     }
 
     // The amount to send, or null for everything the wallet can spend; or an error. A destination
-    // that fixes the amount wins only when nothing else was entered. The point is the only separator
-    // taken: read with a group separator, "0,001" would be 1 BTC.
+    // that fixes the amount wins only when nothing else was entered.
     public static string? Amount(SatoraWithdrawTarget target, string? amountBtc, bool sendAll, out long? amountSats)
     {
         amountSats = null;
         long? typed = null;
         if (!string.IsNullOrWhiteSpace(amountBtc))
         {
-            if (!decimal.TryParse(amountBtc.Trim(), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var btc))
+            if (!TryParseDecimal(amountBtc, out var btc))
                 return "Enter the amount in BTC with a point before the decimals, for example 0.001.";
-            const string outOfRange = "Enter an amount above zero and at most 21,000,000 BTC, with at most 8 decimals.";
-            // Checked before converting: a decimal this large overflows when turned into sats.
-            if (btc <= 0 || btc > 21_000_000m)
-                return outOfRange;
-            var sats = btc * 100_000_000m;
-            if (sats != decimal.Truncate(sats))
-                return outOfRange;
-            typed = (long)sats;
+            if (btc == 0 || ToSats(btc) is not { } sats)
+                return "Enter an amount above zero and at most 21,000,000 BTC, with at most 8 decimals.";
+            typed = sats;
         }
         if (target.Type == SatoraWithdrawalType.LightningInvoice)
         {
@@ -119,5 +113,19 @@ public static class SatoraWithdrawDestinations
             return "The amount differs from the one in the payment request.";
         amountSats = typed ?? target.AmountSats;
         return amountSats is null ? "Enter an amount, or choose to send everything." : null;
+    }
+
+    // The point is the only separator taken: read with a group separator, "0,001" would be 1 BTC.
+    public static bool TryParseDecimal(string text, out decimal value) =>
+        decimal.TryParse(text.Trim(), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out value);
+
+    // Whole sats for an amount in BTC, or null above 21,000,000 BTC or past 8 decimals. The range is
+    // checked first: a decimal this large overflows when turned into sats.
+    public static long? ToSats(decimal btc)
+    {
+        if (btc < 0 || btc > 21_000_000m)
+            return null;
+        var sats = btc * 100_000_000m;
+        return sats == decimal.Truncate(sats) ? (long)sats : null;
     }
 }

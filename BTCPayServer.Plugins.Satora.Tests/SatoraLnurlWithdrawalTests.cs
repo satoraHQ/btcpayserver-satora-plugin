@@ -35,6 +35,8 @@ public class SatoraLnurlWithdrawalTests
     private readonly Clients _clients;
     private readonly Service _service;
 
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
     public SatoraLnurlWithdrawalTests()
     {
         _swaps = new MemoryOutgoingSwaps(_events);
@@ -88,6 +90,25 @@ public class SatoraLnurlWithdrawalTests
         Assert.Equal(SatoraWithdrawResultKind.Pending, result.Kind);
         Assert.Equal(["send-max quote 100000", "send-max quote 100000 (gated)"], _events.All.Where(e => e.StartsWith("send-max", StringComparison.Ordinal)));
         Assert.Equal(_payee.Invoices[^1], _swaps.Rows["swap"].Bolt11);
+        AssertTheSwapServerSawOnlyThePayeesInvoices();
+    }
+
+    // The automatic run pays the invoice its plan asked the payee for, rather than asking again.
+    [Fact]
+    public async Task SavesAndRunsAnAutomaticWithdrawalToAnHttpLnurl()
+    {
+        var lnurl = LNURL.LNURL.EncodeBech32(Endpoint);
+
+        var (saved, message) = await _service.SaveAutoWithdrawAsync(Store,
+            new SatoraAutoWithdrawRequest { Destination = lnurl, ThresholdBtc = "0.0005", ReserveBtc = "0.0001", MaxFeePercent = "1" });
+        Assert.True(saved, message);
+        var invoicesBefore = _payee.Invoices.Count;
+        var result = await _service.ExecuteAutoAsync(Store, Ct);
+
+        Assert.Equal(SatoraAutoWithdrawOutcome.Pending, result.Outcome);
+        Assert.Equal(invoicesBefore + 1, _payee.Invoices.Count);
+        Assert.Equal(_payee.Invoices[^1], _swaps.Rows["swap"].Bolt11);
+        Assert.True(Assert.Single(_withdrawals.Rows.Values) is { Origin: SatoraWithdrawalOrigin.Auto, AmountSats: 12_345, FeeSats: 38 });
         AssertTheSwapServerSawOnlyThePayeesInvoices();
     }
 
@@ -184,6 +205,8 @@ public class SatoraLnurlWithdrawalTests
         public override string? Unavailable => null;
 
         protected override Network Network => Network.RegTest;
+
+        protected override Task NotifyDestinationChangedAsync(string storeId, string destination) => Task.CompletedTask;
 
         protected override Task NotifyUnknownAsync(SatoraWithdrawal withdrawal) => Task.CompletedTask;
     }

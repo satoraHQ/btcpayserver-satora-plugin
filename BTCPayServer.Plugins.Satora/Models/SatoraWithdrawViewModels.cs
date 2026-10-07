@@ -74,7 +74,27 @@ public class SatoraWithdrawPageModel
 
     public bool AutomatedLightningPayouts { get; set; }
 
+    public SatoraAutoWithdrawRule? AutoWithdraw { get; set; }
+
+    // What the owner submitted for the rule when it was refused, to show again.
+    public SatoraAutoWithdrawRequest? AutoWithdrawForm { get; set; }
+
     public DateTimeOffset Now { get; set; }
+}
+
+// Amounts as text, parsed as SatoraWithdrawRequest.AmountBtc is.
+public class SatoraAutoWithdrawRequest
+{
+    public string? Destination { get; set; }
+
+    public string? ThresholdBtc { get; set; }
+
+    public string? ReserveBtc { get; set; }
+
+    public string? MaxFeePercent { get; set; }
+
+    // The version of the rule the form showed; null when there was none.
+    public int? Version { get; set; }
 }
 
 public class SatoraResolveWithdrawalViewModel

@@ -62,8 +62,8 @@ public enum SatoraSettleOutcome
 // Error: for a Failed settle, the SDK's reason.
 public sealed record SatoraSettleResult(SatoraSettleOutcome Outcome, string Message, string? Error = null);
 
-// A Lightning address's or LNURL's endpoint that did not answer: the payee's to fix, so a review tells
-// the store without logging it as a failure of the plugin.
+// A Lightning address's or LNURL's endpoint that did not answer: the payee's to fix, so a review or a
+// rule save tells the store without logging it as a failure of the plugin.
 public sealed class SatoraPayeeException(string message, Exception? innerException = null) : InvalidOperationException(message, innerException);
 
 // Withdrawals from a store's wallet, by hand or by its automatic withdrawal rule. Each attempt is
@@ -92,8 +92,12 @@ public class SatoraWithdrawalService(
         "A withdrawal's outcome is unknown. Check the wallet's balance and mark it sent or failed before withdrawing again.";
     public const string ExpiringFundsMessage = "Some of the wallet's funds are about to expire. They are being renewed. Try again in a minute.";
     public const string CloseConfirmationWord = "CLOSE";
-    // arkd's dust (330 sats today): the least recoverable total ark-client settles.
+    private const decimal MaxFeePercentLimit = 10m;
+    // arkd's dust (330 sats today): the least an automatic withdrawal sends, and the least recoverable
+    // total ark-client settles. Every exit also keeps it as Arkade change, and pays mainnet arkd's flat
+    // output fee besides.
     public const long DustSats = 330;
+    private const long ExitFeeFloorSats = 200;
     private const string Stopping = "BTCPay is stopping";
 
     // Withdrawals whose request is running in this process, with their store. BTCPay runs as one
@@ -120,6 +124,7 @@ public class SatoraWithdrawalService(
             Unfinished = unfinished,
             UnfinishedHeld = held.ToDictionary(h => h.SwapId, h => h.Amounts),
             AutomatedLightningPayouts = await HasAutomatedLightningPayoutsAsync(storeId),
+            AutoWithdraw = await rules.GetAsync(storeId),
             Now = now
         };
     }
@@ -265,6 +270,94 @@ public class SatoraWithdrawalService(
         withdrawals.ResolveAsync(storeId, id, sent, IsRunning(id), DateTimeOffset.UtcNow);
 
     public bool IsRunning(string withdrawalId) => _running.ContainsKey(withdrawalId);
+
+    // The owner's automatic withdrawal rule, applied as soon as it is saved. Only what holds whatever
+    // the wallet holds is checked, as the wallet is often empty when the rule is set up: the
+    // destination, that what the threshold leaves above the reserve can be sent at all, and for a
+    // Lightning address or LNURL that its endpoint issues an invoice for that and the swap server
+    // quotes it, which does not depend on the balance. Each run holds its fees to the rule's cap. The
+    // store's owners and the server admins hear of every new destination, the first included.
+    public async Task<(bool Saved, string Message)> SaveAutoWithdrawAsync(string storeId, SatoraAutoWithdrawRequest request)
+    {
+        if (Network is not { } network)
+            return (false, Unavailable ?? "Satora is not available on this server's network.");
+        var target = SatoraWithdrawDestinations.Detect(request.Destination, network, out var error);
+        if (target is null)
+            return (false, error!);
+        if (target.Type == SatoraWithdrawalType.LightningInvoice)
+            return (false, "A Lightning invoice can be paid only once. Enter an Arkade address, a Lightning address or LNURL, or a Bitcoin address.");
+        if (target.AmountSats is not null)
+            return (false, "An automatic withdrawal sends what the wallet holds. Enter the address without an amount.");
+        if (Sats(request.ThresholdBtc) is not { } threshold || threshold == 0)
+            return (false, "Enter the threshold in BTC, above zero, with a point before the decimals, for example 0.001.");
+        long reserve = 0;
+        if (!string.IsNullOrWhiteSpace(request.ReserveBtc))
+        {
+            if (Sats(request.ReserveBtc) is not { } typed)
+                return (false, "Enter the reserve in BTC with a point before the decimals, for example 0.0005, or leave it empty for none.");
+            reserve = typed;
+        }
+        // A run can leave exactly the reserve as change, and ark-client counts change below dust as
+        // recoverable, which no withdrawal spends and which cannot be settled on its own.
+        if (reserve is > 0 and < DustSats)
+            return (false, $"The reserve must be at least {DustSats} sats, or empty for none.");
+        if (request.MaxFeePercent is null || !SatoraWithdrawDestinations.TryParseDecimal(request.MaxFeePercent, out var percent) ||
+            percent > MaxFeePercentLimit || percent * 100 != decimal.Truncate(percent * 100))
+            return (false, $"Enter the maximum fee as a percentage from 0 to {MaxFeePercentLimit:0}, with at most 2 decimals.");
+        var least = target.Type switch
+        {
+            SatoraWithdrawalType.Arkade => DustSats,
+            SatoraWithdrawalType.Bitcoin => DustSats + DustSats + ExitFeeFloorSats,
+            _ => 0
+        };
+        if (threshold - reserve < least)
+            return (false, $"The threshold must be at least {least} sats above the reserve for this destination.");
+        try
+        {
+            var wallet = await wallets.GetAsync(storeId);
+            if (target.Type == SatoraWithdrawalType.Arkade &&
+                string.Equals(target.Destination, await wallet.GetArkadeAddressAsync(), StringComparison.OrdinalIgnoreCase))
+                return (false, "That is this wallet's own Arkade address. Enter another wallet's.");
+            if (SatoraWithdrawDestinations.IsLightning(target.Type))
+            {
+                var budget = threshold - reserve;
+                var most = await SendMaxAsync(wallet, budget);
+                var sats = Math.Min(most.Sats, most.MaxSats);
+                if (sats < most.MinSats)
+                    return (false, $"The threshold leaves {most.Sats} sats to send after fees, below Satora's Lightning minimum of {most.MinSats} sats. Raise the threshold or lower the reserve.");
+                await PlanLightningAsync(wallet, target, sats, budget, network, capToMaxSendable: true);
+            }
+        }
+        catch (SatoraPayeeException e)
+        {
+            return (false, $"{e.Message} Nothing was saved.");
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "Checking the automatic withdrawal destination of store {StoreId} failed", storeId);
+            return (false, $"The destination could not be checked ({e.Message}). Nothing was saved.");
+        }
+        var rule = new SatoraAutoWithdrawRule
+        {
+            StoreId = storeId,
+            DestinationType = target.Type,
+            Destination = target.Destination,
+            ThresholdSats = threshold,
+            ReserveSats = reserve,
+            MaxFeeBps = (int)(percent * 100)
+        };
+        var (saved, previous) = await rules.SaveAsync(rule, request.Version, DateTimeOffset.UtcNow);
+        if (!saved)
+            return (false, "The automatic withdrawal settings changed since this page was loaded. Check them and save again.");
+        if (previous?.Destination != rule.Destination)
+            await NotifyDestinationChangedAsync(storeId, rule.Destination);
+        return (true, "Automatic withdrawal is on.");
+
+        static long? Sats(string? btc) =>
+            btc is not null && SatoraWithdrawDestinations.TryParseDecimal(btc, out var value) ? SatoraWithdrawDestinations.ToSats(value) : null;
+    }
+
+    public Task<bool> DisableAutoWithdrawAsync(string storeId) => rules.DisableAsync(storeId, DateTimeOffset.UtcNow);
 
     // The store's automatic withdrawal. It waits for every withdrawal of the store still open and for
     // every Lightning payment whose funding is unresolved, and is planned in full, quotes included,
@@ -862,6 +955,18 @@ public class SatoraWithdrawalService(
         Kind: SdkErrorKind.Api or SdkErrorKind.InvalidSwap or SdkErrorKind.InvalidSigner or SdkErrorKind.Decode or
         SdkErrorKind.UnsupportedQuotePath or SdkErrorKind.InvalidBaseUrl
     };
+
+    protected virtual async Task NotifyDestinationChangedAsync(string storeId, string destination)
+    {
+        try
+        {
+            await notifier.SendAsync(storeId, new SatoraWalletNotification { StoreId = storeId, Kind = SatoraWalletNotification.Kinds.DestinationChanged, Destination = destination });
+        }
+        catch (Exception e)
+        {
+            logger.LogError(e, "Could not send the Satora automatic withdrawal destination notification for store {StoreId}", storeId);
+        }
+    }
 
     protected virtual async Task NotifyUnknownAsync(SatoraWithdrawal withdrawal)
     {

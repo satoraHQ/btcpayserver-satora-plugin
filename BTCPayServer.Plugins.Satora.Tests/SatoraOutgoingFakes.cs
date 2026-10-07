@@ -208,12 +208,15 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
     public Exception? OffboardQuoteError { get; set; }
     // Runs as the balance is read.
     public Action? DuringBalanceRead { get; set; }
+    public string ArkadeAddress { get; set; } = "ark1own";
 
     public Task<ArkadeBalance> GetBalanceAsync()
     {
         DuringBalanceRead?.Invoke();
         return Task.FromResult(Balance);
     }
+
+    public Task<string> GetArkadeAddressAsync() => Task.FromResult(ArkadeAddress);
 
     public Task<string?> SettleArkadeAsync()
     {
@@ -468,6 +471,9 @@ public sealed class TestWithdrawalService(OutgoingEvents events, SatoraWalletAcc
 {
     public List<string> Notified { get; } = [];
 
+    // The automatic withdrawal destinations the store was told of.
+    public List<string> DestinationsNotified { get; } = [];
+
     public LNURLPayRequest PayRequest { get; } = new()
     {
         Callback = new Uri("https://example.com/lnurlp/alice/callback"),
@@ -505,6 +511,12 @@ public sealed class TestWithdrawalService(OutgoingEvents events, SatoraWalletAcc
     protected override Task NotifyUnknownAsync(SatoraWithdrawal withdrawal)
     {
         Notified.Add(withdrawal.Id);
+        return Task.CompletedTask;
+    }
+
+    protected override Task NotifyDestinationChangedAsync(string storeId, string destination)
+    {
+        DestinationsNotified.Add(destination);
         return Task.CompletedTask;
     }
 
