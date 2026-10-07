@@ -682,21 +682,10 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
             var nbx = new NBXplorerNetworkProvider(ChainName.Regtest);
             _networks = new BTCPayNetworkProvider([new BTCPayNetwork { CryptoCode = "BTC", NBXplorerNetwork = nbx.GetFromCryptoCode("BTC") }], nbx, new Logs());
 
-            // A database as master leaves it, with a legacy seed and a swap row. Migrator.MigrateAsync(target)
-            // only looks targets up by 14 digit ids, so master's migrations are applied as it would apply them.
+            // A database as master leaves it, with a legacy seed and a swap row.
             await using (var ctx = _contexts.CreateContext())
             {
-                var assembly = ctx.GetService<IMigrationsAssembly>();
-                var generator = ctx.GetService<IMigrationsSqlGenerator>();
-                var history = ctx.GetService<IHistoryRepository>();
-                await ctx.Database.ExecuteSqlRawAsync(history.GetCreateIfNotExistsScript());
-                foreach (var (id, type) in assembly.Migrations.Where(m => string.CompareOrdinal(m.Key, MasterMigration) <= 0))
-                {
-                    var migration = assembly.CreateMigration(type, ctx.Database.ProviderName!);
-                    foreach (var command in generator.Generate(migration.UpOperations))
-                        await ctx.Database.ExecuteSqlRawAsync(command.CommandText);
-                    await ctx.Database.ExecuteSqlRawAsync(history.GetInsertScript(new HistoryRow(id, ProductInfo.GetVersion())));
-                }
+                await MigrateUpToAsync(ctx, MasterMigration);
                 await ctx.Database.ExecuteSqlRawAsync(
                     $"INSERT INTO {Schema}.\"SatoraSettings\" (\"StoreId\", \"Enabled\", \"CryptedSeed\") VALUES ('{LegacyStore}', true, '{LegacyCiphertext}')");
             }
@@ -704,6 +693,23 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
             // What PluginMigrationRunner does at startup.
             await using (var ctx = _contexts.CreateContext())
                 await ctx.Database.MigrateAsync();
+        }
+
+        // Applies the plugin's migrations up to and including lastId, as a deployment that stopped there
+        // applied them. Migrator.MigrateAsync(target) only looks targets up by 14 digit ids.
+        public static async Task MigrateUpToAsync(SatoraPluginDbContext ctx, string lastId)
+        {
+            var assembly = ctx.GetService<IMigrationsAssembly>();
+            var generator = ctx.GetService<IMigrationsSqlGenerator>();
+            var history = ctx.GetService<IHistoryRepository>();
+            await ctx.Database.ExecuteSqlRawAsync(history.GetCreateIfNotExistsScript());
+            foreach (var (id, type) in assembly.Migrations.Where(m => string.CompareOrdinal(m.Key, lastId) <= 0))
+            {
+                var migration = assembly.CreateMigration(type, ctx.Database.ProviderName!);
+                foreach (var command in generator.Generate(migration.UpOperations))
+                    await ctx.Database.ExecuteSqlRawAsync(command.CommandText);
+                await ctx.Database.ExecuteSqlRawAsync(history.GetInsertScript(new HistoryRow(id, ProductInfo.GetVersion())));
+            }
         }
 
         public async ValueTask DisposeAsync()

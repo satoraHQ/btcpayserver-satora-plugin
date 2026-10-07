@@ -46,6 +46,7 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddSingleton<SatoraOutgoingSwaps>()
                 .AddSingleton<SatoraLightningPayments>()
                 .AddSingleton<SatoraWithdrawals>()
+                .AddSingleton<SatoraAutoWithdrawRules>()
                 .AddSingleton<SatoraWithdrawalService>()
                 .AddSingleton<ILightningConnectionStringHandler, SatoraLightningConnectionStringHandler>()
                 .AddHostedService<SatoraLightningWorker>()

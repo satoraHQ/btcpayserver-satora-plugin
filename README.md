@@ -416,9 +416,9 @@ payment, include its swap id.
 
 The plugin stores its data in the BTCPay Postgres database under the schema
 `"BTCPayServer.Plugins.Satora"` (settings incl. the encrypted wallet seed, swap
-transactions, Lightning and on-chain swaps, and withdrawals). Its EF Core
-migration-history table lives in the search-path schema (typically `public`) as
-a table named `BTCPayServer.Plugins.Satora`.
+transactions, Lightning and on-chain swaps, withdrawals and automatic
+withdrawal rules). Its EF Core migration-history table lives in the search-path
+schema (typically `public`) as a table named `BTCPayServer.Plugins.Satora`.
 
 To fully purge the plugin's data:
 
