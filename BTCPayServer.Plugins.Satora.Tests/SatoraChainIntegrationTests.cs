@@ -3,6 +3,7 @@ using BTCPayServer.Abstractions.Models;
 using BTCPayServer.Data;
 using BTCPayServer.Events;
 using BTCPayServer.Logging;
+using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
@@ -388,11 +389,11 @@ public class SatoraChainPromptIntegrationTests(SatoraChainPromptIntegrationTests
 
     // Saves the new swap's prompt as InvoiceActivator would.
     private sealed class Renewer(SatoraChainCredit credit, Func<Task<bool>> renew)
-        : SatoraChainPromptRenewer(null!, null!, null!, credit, NullLogger<SatoraChainPromptRenewer>.Instance)
+        : SatoraPromptRenewer(null!, null!, null!, credit, null!, NullLogger<SatoraPromptRenewer>.Instance)
     {
         public int Renewals { get; private set; }
 
-        protected override Task<bool> RenewPromptAsync(string invoiceId)
+        protected override Task<bool> RenewPromptAsync(string invoiceId, PaymentMethodId method)
         {
             Renewals++;
             return renew();

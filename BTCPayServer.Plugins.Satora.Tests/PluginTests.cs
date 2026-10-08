@@ -97,8 +97,8 @@ public class PluginTests
         AssertCompiledPartial(services, "checkout-end", "SatoraChain/SatoraChainMethodCheckout");
         AssertCompiledPartial(services, "store-invoices-payments", "SatoraChain/ViewSatoraChainPaymentData");
         Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraChainWorker));
-        Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraChainPromptRenewer));
-        foreach (var dependency in new[] { typeof(SatoraChainWorker), typeof(SatoraChainPaymentHandler), typeof(SatoraChainPromptRenewer), typeof(SatoraChainWallets) }
+        Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraPromptRenewer));
+        foreach (var dependency in new[] { typeof(SatoraChainWorker), typeof(SatoraChainPaymentHandler), typeof(SatoraPromptRenewer), typeof(SatoraChainWallets) }
                      .SelectMany(t => t.GetConstructors().Single().GetParameters().Select(p => p.ParameterType))
                      .Where(t => t.Assembly == typeof(Plugin).Assembly))
             Assert.Contains(services, d => d.ServiceType == dependency);

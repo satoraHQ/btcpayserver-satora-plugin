@@ -68,10 +68,11 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddUIExtension("checkout-end", "SatoraChain/SatoraChainMethodCheckout")
                 .AddUIExtension("store-invoices-payments", "SatoraChain/ViewSatoraChainPaymentData")
                 .AddHostedService<SatoraChainWorker>()
-                .AddHostedService<SatoraChainPromptRenewer>()
+                .AddHostedService<SatoraPromptRenewer>()
                 .AddSingleton<INotificationHandler, SatoraChainNotification.Handler>()
                 .AddSingleton<SatoraStableSwaps>()
                 .AddSingleton<SatoraStableQuotes>()
+                .AddSingleton<SatoraStableCredit>()
                 .AddSingleton<SatoraStoreStableConfig>()
                 .AddUIExtension("checkout-end", "SatoraStable/SatoraStableMethodCheckout")
                 .AddSingleton<SatoraPluginService>();

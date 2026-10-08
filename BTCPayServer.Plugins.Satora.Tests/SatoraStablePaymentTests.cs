@@ -414,7 +414,7 @@ public class SatoraStablePaymentTests
     }
 
     // As UIInvoiceController creates an invoice, with the store's lazy payment methods off.
-    private static async Task<PaymentMethodContext> Create(IPaymentMethodHandler handler, InvoiceEntity invoice)
+    internal static async Task<PaymentMethodContext> Create(IPaymentMethodHandler handler, InvoiceEntity invoice)
     {
         var store = new StoreData { Id = "store" };
         store.SetPaymentMethodConfig(handler, new SatoraStablePaymentMethodConfig());

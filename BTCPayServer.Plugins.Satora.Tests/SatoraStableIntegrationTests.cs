@@ -3,6 +3,7 @@ using BTCPayServer.Data;
 using BTCPayServer.Events;
 using BTCPayServer.Logging;
 using BTCPayServer.Payments;
+using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Plugins.Satora.Services;
 using BTCPayServer.Plugins.Satora.Stable;
@@ -11,6 +12,7 @@ using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Stores;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Npgsql;
@@ -437,6 +439,126 @@ public class SatoraStablePromptIntegrationTests(SatoraChainPromptIntegrationTest
         Assert.Equal(handler.Swaps[1].DepositAddress, renewed.Destination);
         Assert.Equal(handler.Swaps[1].SwapId, handler.ParsePaymentPromptDetails(renewed.Details).SwapId);
         Assert.Equal(2, handler.Requested.Count);
+    }
+
+    // BTCPay's payments table keys a payment by its id and method, so a second write of the funding,
+    // after a restart or a lost answer, finds the first instead of paying the invoice twice.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task RecordsTheFundingOnceAndSettlesItWithWhatTheVhtlcHeld()
+    {
+        var (credit, invoices) = Credit();
+        var swap = await AddInvoiceAsync("credited");
+
+        Assert.Equal(SatoraCreditOutcome.Recorded, await credit.RecordAsync(swap, PaymentStatus.Processing, DateTimeOffset.UtcNow));
+        Assert.Equal(SatoraCreditOutcome.AlreadyRecorded, await credit.RecordAsync(swap, PaymentStatus.Processing, DateTimeOffset.UtcNow));
+        var funded = Assert.Single((await invoices.GetInvoice(swap.InvoiceId)).GetPayments(false));
+        Assert.Equal((PaymentStatus.Processing, 99_500 / 100_000_000m), (funded.Status, funded.Value));
+
+        swap.ClaimTxId = "ark-credited";
+        swap.VhtlcSats = 99_400;
+        Assert.Equal(SatoraCreditOutcome.Recorded, await credit.RecordAsync(swap, PaymentStatus.Settled, DateTimeOffset.UtcNow));
+        Assert.Equal(SatoraCreditOutcome.AlreadyRecorded, await credit.RecordAsync(swap, PaymentStatus.Settled, DateTimeOffset.UtcNow));
+
+        var settled = Assert.Single((await invoices.GetInvoice(swap.InvoiceId)).GetPayments(false));
+        Assert.Equal((PaymentStatus.Settled, 99_400 / 100_000_000m, "ark-credited"),
+            (settled.Status, settled.Value, new SatoraStableFakes.Handler(SatoraStablePaymentTests.Btc).ParsePaymentDetails(settled.Details).ClaimTxId));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task AFundingTakenOffComesBackWhenRecordedAgain()
+    {
+        var (credit, invoices) = Credit();
+        var swap = await AddInvoiceAsync("unaccounted");
+        await credit.RecordAsync(swap, PaymentStatus.Processing, DateTimeOffset.UtcNow);
+
+        await credit.UnaccountAsync(swap);
+        Assert.Equal(PaymentStatus.Unaccounted, Assert.Single((await invoices.GetInvoice(swap.InvoiceId)).GetPayments(false)).Status);
+        await credit.RecordAsync(swap, PaymentStatus.Processing, DateTimeOffset.UtcNow);
+
+        Assert.Equal(PaymentStatus.Processing, Assert.Single((await invoices.GetInvoice(swap.InvoiceId)).GetPayments(false)).Status);
+    }
+
+    // An open checkout fetches the prompt again only on InvoiceNewPaymentDetailsEvent.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task TheDepositProgressReachesThePromptOnlyWhenItChangesAndAnOpenCheckoutIsTold()
+    {
+        var events = new EventAggregator(new Logs());
+        var published = new List<InvoiceNewPaymentDetailsEvent>();
+        using var subscription = events.Subscribe<InvoiceNewPaymentDetailsEvent>(published.Add);
+        var (credit, invoices) = Credit(events);
+        var swap = await AddInvoiceAsync("progress");
+        var method = SatoraStablePaymentMethod.UsdcArbitrum.Id;
+        SatoraStablePromptDetails Details() => SatoraStablePromptDetails.Of(invoices.GetInvoice(swap.InvoiceId).Result.GetPaymentPrompt(method))!;
+
+        await credit.SetDepositProgressAsync(swap.InvoiceId, method, "renewed-since", "4000000");
+        Assert.Null(Details().ReceivedUnits);
+        await credit.SetDepositProgressAsync(swap.InvoiceId, method, swap.SwapId, "4000000");
+        await credit.SetDepositProgressAsync(swap.InvoiceId, method, swap.SwapId, "4000000");
+
+        Assert.Equal(("4000000", swap.SourceUnits, swap.ReceiveSats), (Details().ReceivedUnits, Details().Units, Details().ReceiveSats));
+        var announced = Assert.Single(published);
+        Assert.Equal((swap.InvoiceId, method, "4000000"),
+            (announced.InvoiceId, announced.PaymentMethodId, Assert.IsType<SatoraStablePromptDetails>(announced.Details).ReceivedUnits));
+
+        await credit.DeactivatePromptAsync(swap.InvoiceId, method, swap.SwapId);
+
+        Assert.True((await invoices.GetInvoice(swap.InvoiceId)).GetPaymentPrompt(method) is { Inactive: true });
+        Assert.Equal(2, published.Count);
+        await credit.SetDepositProgressAsync(swap.InvoiceId, method, swap.SwapId, "5000000");
+        Assert.Equal("4000000", Details().ReceivedUnits);
+    }
+
+    private (SatoraStableCredit Credit, InvoiceRepository Invoices) Credit(EventAggregator? events = null)
+    {
+        events ??= new EventAggregator(new Logs());
+        var invoices = new InvoiceRepository(btcpay.Contexts, events);
+        var handlers = new PaymentMethodHandlerDictionary([new SatoraStableFakes.Handler(SatoraStablePaymentTests.Btc)]);
+        return (new SatoraStableCredit(invoices, new PaymentService(events, btcpay.Contexts, handlers, invoices), handlers, events,
+            NullLogger<SatoraStableCredit>.Instance), invoices);
+    }
+
+    // An open invoice whose stablecoin prompt shows the swap's deposit address.
+    private async Task<SatoraStableSwap> AddInvoiceAsync(string name)
+    {
+        var swap = SatoraStableIntegrationTests.Swap("store", name);
+        var now = DateTimeOffset.UtcNow;
+        var invoice = new InvoiceEntity
+        {
+            Id = swap.InvoiceId,
+            StoreId = "store",
+            Currency = "USD",
+            Price = 4000,
+            InvoiceTime = now,
+            ExpirationTime = now.AddMinutes(15),
+            MonitoringExpiration = now.AddHours(1)
+        };
+#pragma warning disable CS0618
+        invoice.Rates["BTC"] = 34_000m;
+#pragma warning restore CS0618
+        var handler = new SatoraStableFakes.Handler(SatoraStablePaymentTests.Btc);
+        invoice.SetPaymentPrompt(handler.PaymentMethodId, new PaymentPrompt
+        {
+            Currency = "BTC",
+            Divisibility = 8,
+            Destination = swap.DepositAddress,
+            PaymentMethodFee = 0m,
+            Details = JObject.FromObject(new SatoraStablePromptDetails
+            {
+                SwapId = swap.SwapId,
+                ChainId = swap.ChainId,
+                Token = swap.Token,
+                TokenAddress = swap.TokenAddress,
+                Decimals = swap.Decimals,
+                Units = swap.SourceUnits,
+                ReceiveSats = swap.ReceiveSats
+            }, handler.Serializer)
+        });
+        var data = new InvoiceData { Id = invoice.Id, StoreDataId = "store", Status = "New" };
+        data.SetBlob(invoice);
+        await using var ctx = btcpay.Contexts.CreateContext();
+        ctx.Invoices.Add(data);
+        await ctx.SaveChangesAsync(Ct);
+        return swap;
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;

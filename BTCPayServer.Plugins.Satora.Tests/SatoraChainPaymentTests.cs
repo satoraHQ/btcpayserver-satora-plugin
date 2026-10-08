@@ -6,6 +6,7 @@ using BTCPayServer.Models.InvoicingModels;
 using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Models;
+using BTCPayServer.Plugins.Satora.Services;
 using BTCPayServer.Services.Invoices;
 using NBitcoin;
 using NBXplorer;
@@ -37,6 +38,7 @@ public class SatoraChainPaymentTests
     private static readonly DateTimeOffset Expiry = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000 - 300 - 3600);
     private static readonly string Htlc = new Key().PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Network.RegTest).ToString();
     private const long Fee = 235;
+    private static readonly SatoraSwapPrompt ChainPrompt = SatoraPromptRenewer.SwapPrompts.Single(p => p.Id == SatoraChainPaymentMethod.Id);
 
     // 4000 USD at 34000 USD/BTC is 0.11764706 BTC once BTCPay rounds it up to whole sats.
     private const long DueSats = 11_764_706;
@@ -352,20 +354,20 @@ public class SatoraChainPaymentTests
     {
         var invoice = Invoice();
         var prompt = await Configure(new FakeSwapHandler(), invoice);
-        Assert.False(SatoraChainPromptRenewer.NeedsRenewal(invoice));
+        Assert.False(SatoraPromptRenewer.NeedsRenewal(invoice, ChainPrompt));
 
         AddPayment(invoice, new PaymentEntity { Id = "lightning", Currency = "BTC", Value = 0.05m, Status = PaymentStatus.Settled, PaymentMethodId = PaymentTypes.LN.GetPaymentMethodId("BTC") });
-        Assert.True(SatoraChainPromptRenewer.NeedsRenewal(invoice));
+        Assert.True(SatoraPromptRenewer.NeedsRenewal(invoice, ChainPrompt));
 
         invoice.Status = InvoiceStatus.Processing;
-        Assert.False(SatoraChainPromptRenewer.NeedsRenewal(invoice));
+        Assert.False(SatoraPromptRenewer.NeedsRenewal(invoice, ChainPrompt));
         invoice.Status = InvoiceStatus.New;
         // A lazy prompt gets the current due when the customer picks it.
         prompt.Inactive = true;
         invoice.SetPaymentPrompt(SatoraChainPaymentMethod.Id, prompt);
-        Assert.False(SatoraChainPromptRenewer.NeedsRenewal(invoice));
-        Assert.False(SatoraChainPromptRenewer.NeedsRenewal(Invoice()));
-        Assert.False(SatoraChainPromptRenewer.NeedsRenewal(null));
+        Assert.False(SatoraPromptRenewer.NeedsRenewal(invoice, ChainPrompt));
+        Assert.False(SatoraPromptRenewer.NeedsRenewal(Invoice(), ChainPrompt));
+        Assert.False(SatoraPromptRenewer.NeedsRenewal(null, ChainPrompt));
     }
 
     // The renewed swap takes what was left after an on-chain payment that a fee bump then replaced:
@@ -380,14 +382,14 @@ public class SatoraChainPaymentTests
         var handler = new FakeSwapHandler();
         await Configure(handler, invoice);
         Assert.Equal([DueSats - 5_000_000], handler.Requested);
-        Assert.False(SatoraChainPromptRenewer.NeedsRenewal(invoice));
+        Assert.False(SatoraPromptRenewer.NeedsRenewal(invoice, ChainPrompt));
 
         partial.Status = PaymentStatus.Unaccounted;
         invoice.UpdateTotals();
         // As InvoiceWatcher marks an invoice with nothing paid.
         invoice.ExceptionStatus = InvoiceExceptionStatus.None;
 
-        Assert.True(SatoraChainPromptRenewer.NeedsRenewal(invoice));
+        Assert.True(SatoraPromptRenewer.NeedsRenewal(invoice, ChainPrompt));
     }
 
     // Known only on mainnet: 12 hours less the claim margin and the confirmation allowance.

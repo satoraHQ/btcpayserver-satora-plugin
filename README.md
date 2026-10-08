@@ -354,8 +354,9 @@ the token's contract. The QR code holds an EIP-681 payment link, or the plain
 address for exchange apps and wallets that read only an address. BTCPay's
 header still shows the amount due in bitcoin. Once part of the deposit arrives,
 checkout shows how much and asks for the rest. Once all of it arrives, checkout
-says so. After a partial payment through another method, checkout shows no
-address for an amount its swap would not pay.
+says so. After a partial payment through another method, the prompt gets a new
+swap for what is left, as on-chain payments do. Until then, or if the swap
+server refuses the new swap, checkout shows no address.
 
 Set the store's payment tolerance a point or so above the floor the Satora page
 names. A payment can arrive short by up to the swap's fees, because the DEX
