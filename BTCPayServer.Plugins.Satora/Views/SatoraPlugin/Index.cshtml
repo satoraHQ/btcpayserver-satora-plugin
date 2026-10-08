@@ -178,6 +178,7 @@
             <partial name="_SatoraWalletBalance" model="Model.StoreId" />
             <a asp-controller="SatoraWithdraw" asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-primary mb-3">Withdraw</a>
             <a asp-controller="SatoraChainRefund" asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-outline-secondary mb-3">On-chain refunds</a>
+            <a asp-controller="SatoraStableRefund" asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-outline-secondary mb-3">Stablecoin refunds</a>
             <partial name="_SatoraSpendingBoundary" model="Model.AutomatedLightningPayouts" />
 
             <h4 class="mt-4">Stablecoins</h4>

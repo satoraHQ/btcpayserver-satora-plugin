@@ -1,5 +1,6 @@
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Models;
+using BTCPayServer.Plugins.Satora.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace BTCPayServer.Plugins.Satora.Stable;
@@ -11,6 +12,18 @@ namespace BTCPayServer.Plugins.Satora.Stable;
 // the rows in memory.
 public class SatoraStableSwaps(SatoraPluginDbContextFactory dbContextFactory)
 {
+    // Any sweep call may send. The worker holds the swap from before it reads the swap for a sweep
+    // until the outcome is recorded, and the owner's dismissal is decided only while no call holds it,
+    // so a swap the owner dismissed is never swept afterwards. One BTCPay process per database, as the
+    // workers' ticks already assume.
+    private readonly SatoraKeyedLock _sweepHolds = new();
+
+    public Task<IDisposable> HoldForSweepAsync(string swapId, CancellationToken cancellationToken) =>
+        _sweepHolds.EnterAsync(swapId, cancellationToken);
+
+    // Null while a sweep call holds the swap.
+    public IDisposable? TryHoldForDismissal(string swapId) => _sweepHolds.TryEnter(swapId);
+
     public async Task AddAsync(SatoraStableSwap swap)
     {
         await using var ctx = dbContextFactory.CreateContext();
@@ -96,13 +109,18 @@ public class SatoraStableSwaps(SatoraPluginDbContextFactory dbContextFactory)
     }
 
     // Only for a swap still open, not yet waiting for the owner and with the claim the worker read:
-    // false when any of that changed since.
-    public virtual async Task<bool> SetNeedsAttentionAsync(string swapId, string? claimTxId, SatoraStableAttention reason, DateTimeOffset now)
+    // false when any of that changed since. A sweep token names another token than the swap's own at
+    // the deposit address.
+    public virtual async Task<bool> SetNeedsAttentionAsync(string swapId, string? claimTxId, SatoraStableAttention reason, DateTimeOffset now,
+        string? sweepToken = null)
     {
         await using var ctx = dbContextFactory.CreateContext();
         return await ctx.SatoraStableSwaps
             .Where(s => s.SwapId == swapId && s.NeedsAttentionAt == null && s.CompletedAt == null && s.ClaimTxId == claimTxId)
-            .ExecuteUpdateAsync(u => u.SetProperty(s => s.NeedsAttentionAt, now).SetProperty(s => s.AttentionReason, reason)) > 0;
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(s => s.NeedsAttentionAt, now)
+                .SetProperty(s => s.AttentionReason, reason)
+                .SetProperty(s => s.SweepToken, sweepToken)) > 0;
     }
 
     // The owner's sweep destination, and token for a wrong-token deposit, which can change until the
@@ -129,6 +147,61 @@ public class SatoraStableSwaps(SatoraPluginDbContextFactory dbContextFactory)
 
     public virtual Task SetSweepTxHashAsync(string swapId, string txHash) =>
         Update(swapId, u => u.SetProperty(s => s.SweepTxHash, txHash));
+
+    // After another token went back, the swap's own token left at the address waits for a destination
+    // of its own. Only while the sweep is still of the token the worker sent and the swap is open.
+    public virtual async Task<bool> ResetSweepToOwnTokenAsync(string swapId, string sweptToken)
+    {
+        await using var ctx = dbContextFactory.CreateContext();
+        return await ctx.SatoraStableSwaps
+            .Where(s => s.SwapId == swapId && s.SweepToken == sweptToken && s.CompletedAt == null)
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(s => s.SweepToken, (string?)null)
+                .SetProperty(s => s.SweepDestination, (string?)null)
+                .SetProperty(s => s.SweepAttempted, false)
+                .SetProperty(s => s.SweepTxHash, (string?)null)) > 0;
+    }
+
+    // The owner's decision not to send back what is at the deposit address: the worker stops following
+    // the swap. A deposit in the HTLC stays open for its refund.
+    public virtual async Task<bool> DismissAsync(string storeId, string swapId, DateTimeOffset now)
+    {
+        await using var ctx = dbContextFactory.CreateContext();
+        return await ctx.SatoraStableSwaps
+            .Where(s => s.StoreId == storeId && s.SwapId == swapId && s.AttentionReason == SatoraStableAttention.Sweep &&
+                        s.NeedsAttentionAt != null && s.CompletedAt == null)
+            .ExecuteUpdateAsync(u => u.SetProperty(s => s.ClosedReason, SatoraStableRefunds.DismissedReason).SetProperty(s => s.CompletedAt, now)) > 0;
+    }
+
+    // The store's swaps with this swap id, or of this invoice, oldest first.
+    public virtual async Task<List<SatoraStableSwap>> FindByIdAsync(string storeId, string id)
+    {
+        await using var ctx = dbContextFactory.CreateContext();
+        return await ctx.SatoraStableSwaps.AsNoTracking()
+            .Where(s => s.StoreId == storeId && (s.SwapId == id || s.InvoiceId == id))
+            .OrderBy(s => s.CreatedAt)
+            .ToListAsync();
+    }
+
+    // Lists a closed swap whose deposit address received tokens after all for the owner to send back,
+    // with a destination still to enter. Only the close the reader saw. The caller read the address
+    // through the store's current wallet, which the SDK allows only for a swap that wallet's seed
+    // made, and holds the registry's use, so no replace runs in between.
+    public virtual async Task<bool> ReopenForSweepAsync(string storeId, string swapId, DateTimeOffset closedAt, string? token, DateTimeOffset now)
+    {
+        await using var ctx = dbContextFactory.CreateContext();
+        return await ctx.SatoraStableSwaps
+            .Where(s => s.StoreId == storeId && s.SwapId == swapId && s.CompletedAt == closedAt)
+            .ExecuteUpdateAsync(u => u
+                .SetProperty(s => s.CompletedAt, (DateTimeOffset?)null)
+                .SetProperty(s => s.ClosedReason, (string?)null)
+                .SetProperty(s => s.NeedsAttentionAt, now)
+                .SetProperty(s => s.AttentionReason, SatoraStableAttention.Sweep)
+                .SetProperty(s => s.SweepToken, token)
+                .SetProperty(s => s.SweepDestination, (string?)null)
+                .SetProperty(s => s.SweepAttempted, false)
+                .SetProperty(s => s.SweepTxHash, (string?)null)) > 0;
+    }
 
     // False for a swap closed since, as by the owner's dismissal.
     public virtual async Task<bool> SetClosedAsync(string swapId, string reason, DateTimeOffset now)

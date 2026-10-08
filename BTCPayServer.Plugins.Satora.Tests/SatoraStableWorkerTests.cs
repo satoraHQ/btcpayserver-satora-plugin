@@ -29,6 +29,8 @@ public class SatoraStableWorkerTests
     private const string Id = "store-swap";
     // The swap's deposit: 10.13 USDC.
     private const long Deposit = 10_130_000;
+    // What the swap's HTLC locked on Arbitrum.
+    private const string Tbtc = "0x6c84a8f1c29108F47a79964b5Fe888D4f4D0dE40";
 
     private readonly List<string> _events = [];
     private readonly MemorySwaps _swaps = new();
@@ -714,8 +716,16 @@ public class SatoraStableWorkerTests
         await _worker.TickAsync(Store, Ct);
 
         Assert.Equal([$"deactivate {Id}"], _events);
-        Assert.Equal(SatoraStableAttention.Sweep, Row.AttentionReason);
+        Assert.True(Row is { AttentionReason: SatoraStableAttention.Sweep, SweepToken: Tbtc });
         Assert.Equal((Problems.NeedsSweep, SatoraStableActions.HtlcRefundedReason), (_worker.Sent.Single().Problem, _worker.Sent.Single().Status));
+
+        Row.SweepDestination = SatoraStableRefundsTests.Customer;
+        _wallets.Held[(Id, Tbtc)] = 120_000;
+        _wallets.Gas[Id] = 1;
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.Contains($"sweep {Id} {SatoraStableRefundsTests.Customer} {Tbtc}", _events);
+        Assert.True(Row is { SweepTxHash: "0xsweep-1", CompletedAt: not null });
     }
 
     // The funding spent the swap's nonce, so anything still at the address was sent on top of the deposit.
@@ -728,7 +738,7 @@ public class SatoraStableWorkerTests
         await _worker.TickAsync(Store, Ct);
 
         Assert.Equal([$"read {Id}", $"deactivate {Id}"], _events);
-        Assert.True(Row is { AttentionReason: SatoraStableAttention.Sweep, Credited: true, CompletedAt: null });
+        Assert.True(Row is { AttentionReason: SatoraStableAttention.Sweep, Credited: true, CompletedAt: null, SweepToken: null });
         Assert.Equal((Problems.NeedsSweep, SatoraStableActions.LeftoverReason), (_worker.Sent.Single().Problem, _worker.Sent.Single().Status));
     }
 
@@ -741,7 +751,7 @@ public class SatoraStableWorkerTests
         await _worker.TickAsync(Store, Ct);
 
         Assert.Equal([$"deactivate {Id}"], _events);
-        Assert.True(Row is { AttentionReason: SatoraStableAttention.Sweep, Credited: true, CompletedAt: null });
+        Assert.True(Row is { AttentionReason: SatoraStableAttention.Sweep, Credited: true, CompletedAt: null, SweepToken: Tbtc });
         Assert.Equal((Problems.NeedsSweep, SatoraStableActions.HtlcRefundedReason), (_worker.Sent.Single().Problem, _worker.Sent.Single().Status));
     }
 
@@ -778,7 +788,7 @@ public class SatoraStableWorkerTests
         await _worker.TickAsync(Store, Ct);
 
         Assert.Equal([$"amounts {Id}", $"unaccount {Id}", $"deactivate {Id}"], _events);
-        Assert.True(Row is { AttentionReason: SatoraStableAttention.Sweep, ClaimTxId: null, CompletedAt: null });
+        Assert.True(Row is { AttentionReason: SatoraStableAttention.Sweep, ClaimTxId: null, CompletedAt: null, SweepToken: Tbtc });
         Assert.Equal((Problems.NeedsSweep, SatoraStableActions.HtlcRefundedReason), (_worker.Sent.Single().Problem, _worker.Sent.Single().Status));
     }
 
@@ -901,6 +911,256 @@ public class SatoraStableWorkerTests
             vm.Body);
     }
 
+    // The plugin's own page lists no swaps, so an alert names the swap's invoice and leads to it.
+    [Theory]
+    [InlineData("invoice-1", "UIInvoice/Invoice/invoice-1", "Satora stablecoin swap swap of invoice invoice-1 is funded")]
+    // Sent before alerts named the invoice.
+    [InlineData(null, "SatoraPlugin/Index/store", "Satora stablecoin swap swap is funded")]
+    public void AnAlertAboutASwapNamesAndLeadsToItsInvoice(string? invoiceId, string link, string body)
+    {
+        INotificationHandler handler = new SatoraStableNotification.Handler(new RouteLinks(), new BTCPayServerOptions { RootPath = "/" });
+        var vm = new NotificationViewModel { Created = DateTimeOffset.UtcNow };
+
+        handler.FillViewModel(new SatoraStableNotification
+        {
+            StoreId = Store,
+            SwapId = "swap",
+            InvoiceId = invoiceId,
+            Problem = Problems.NearClaimCutoff,
+            Deadline = DateTimeOffset.UtcNow.AddMinutes(5)
+        }, vm);
+
+        Assert.Equal(link, vm.ActionLink);
+        Assert.StartsWith(body, vm.Body);
+    }
+
+    [Theory]
+    [InlineData(Problems.NeedsSweep)]
+    [InlineData(Problems.GasNeeded)]
+    [InlineData(Problems.SweepFailing)]
+    [InlineData(Problems.NeedsHtlcRefund)]
+    public void AnAlertAboutTokensToSendBackLinksTheRefundsPage(Problems problem)
+    {
+        INotificationHandler handler = new SatoraStableNotification.Handler(new RouteLinks(), new BTCPayServerOptions { RootPath = "/" });
+        var vm = new NotificationViewModel { Created = DateTimeOffset.UtcNow };
+
+        handler.FillViewModel(new SatoraStableNotification { StoreId = Store, SwapId = "swap", Problem = problem }, vm);
+
+        Assert.Equal("SatoraStableRefund/Index/store", vm.ActionLink);
+    }
+
+    // Nothing is fixed while the address holds no gas, so the destination can still change until some arrives.
+    [Fact]
+    public async Task ASweepWaitsForGasAtTheAddressAndAlertsOnceWithoutFixingTheDestination()
+    {
+        WaitingForSweep(SatoraStableRefundsTests.Customer);
+        _wallets.Held[(Id, null)] = 500_000;
+
+        await _worker.TickAsync(Store, Ct);
+        await _worker.TickAsync(Store, Ct);
+        _worker.Clock += SatoraStableWorker.SweepCheckInterval;
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.Equal([$"funds {Id}", $"funds {Id}"], _events);
+        Assert.False(Row.SweepAttempted);
+        var alert = Assert.Single(_worker.Sent);
+        Assert.Equal((Problems.GasNeeded, "0.0001 ETH on Arbitrum One"), (alert.Problem, alert.Amount));
+        Assert.Contains("send it about 0.0001 ETH on Arbitrum One from any wallet", SatoraStableNotification.Body(alert, _worker.Clock));
+
+        Row.SweepDestination = SatoraStableRefundsTests.OtherToken;
+        _wallets.Gas[Id] = BigInteger.Pow(10, 14);
+        _worker.Clock += SatoraStableWorker.SweepCheckInterval;
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.Equal($"sweep {Id} {SatoraStableRefundsTests.OtherToken} ", _events[^2]);
+        Assert.True(Row is { SweepAttempted: true, SweepTxHash: "0xsweep-1", CompletedAt: not null, ClosedReason: null });
+        Assert.Equal((InvoiceEventData.EventSeverity.Success,
+                $"The tokens at the deposit address {Row.DepositAddress} of Satora stablecoin swap {Id} were sent to {SatoraStableRefundsTests.OtherToken} in 0xsweep-1."),
+            Assert.Single(_credit.Notes));
+    }
+
+    // The SDK records the transfer before sending it: a call after one that timed out returns its receipt.
+    [Fact]
+    public async Task ASweepIsStartedOnceAndARetryAfterATimeoutReturnsTheSameReceipt()
+    {
+        WaitingForSweep(SatoraStableRefundsTests.Customer, SatoraStableRefundsTests.OtherToken);
+        _wallets.Held[(Id, SatoraStableRefundsTests.OtherToken)] = 7;
+        _wallets.Gas[Id] = 1;
+        _wallets.SweepThenTimeout = true;
+
+        await _worker.TickAsync(Store, Ct);
+        Assert.True(Row is { SweepAttempted: true, SweepTxHash: null, CompletedAt: null });
+        _wallets.SweepThenTimeout = false;
+        _worker.Clock += SatoraStableWorker.SweepCheckInterval;
+        await _worker.TickAsync(Store, Ct);
+
+        var sweep = $"sweep {Id} {SatoraStableRefundsTests.Customer} {SatoraStableRefundsTests.OtherToken}";
+        // The last read is of the swap's own token, which the other token's sweep left alone.
+        Assert.Equal([$"funds {Id}", sweep, $"funds {Id}", sweep, $"funds {Id}", $"funds {Id}"], _events);
+        Assert.Equal(1, _swaps.SweepStarts);
+        Assert.Equal(1, _wallets.Transfers);
+        Assert.True(Row is { SweepTxHash: "0xsweep-1", CompletedAt: not null });
+        Assert.Single(_credit.Notes);
+        Assert.Empty(_worker.Sent);
+    }
+
+    // The sweep sent the whole balance, so what is there after it arrived since.
+    [Fact]
+    public async Task TokensThatArriveAfterASweepGoToTheSameDestination()
+    {
+        WaitingForSweep(SatoraStableRefundsTests.Customer);
+        _wallets.Held[(Id, null)] = 500_000;
+        _wallets.Gas[Id] = 1;
+        _wallets.AfterSweep = () => _wallets.Held[(Id, null)] = 300_000;
+
+        await _worker.TickAsync(Store, Ct);
+        Assert.True(Row is { SweepTxHash: "0xsweep-1", CompletedAt: null });
+        _wallets.AfterSweep = null;
+        _worker.Clock += SatoraStableWorker.SweepCheckInterval;
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.Equal(2, _wallets.Transfers);
+        Assert.Equal(1, _swaps.SweepStarts);
+        Assert.True(Row is { SweepTxHash: "0xsweep-2", CompletedAt: not null });
+        Assert.Equal(["0xsweep-1.", "0xsweep-2."], _credit.Notes.Select(n => n.Message[^10..]));
+    }
+
+    // An overpayment's excess beside a token sent by mistake: the swap does not close with the excess
+    // still at the address, and where the other token went need not be where the excess goes.
+    [Fact]
+    public async Task TheSwapsOwnTokenLeftAfterAnotherTokensSweepWaitsForADestinationOfItsOwn()
+    {
+        const string storeAddress = "0x52908400098527886E0F7030069857D2E4169EE7";
+        WaitingForSweep(SatoraStableRefundsTests.Customer, SatoraStableRefundsTests.OtherToken);
+        _wallets.Held[(Id, SatoraStableRefundsTests.OtherToken)] = 7;
+        _wallets.Held[(Id, null)] = 500_000;
+        _wallets.Gas[Id] = 1;
+
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.True(Row is
+        {
+            CompletedAt: null, AttentionReason: SatoraStableAttention.Sweep, SweepToken: null, SweepDestination: null, SweepAttempted: false,
+            SweepTxHash: null
+        });
+        Assert.Equal((InvoiceEventData.EventSeverity.Warning,
+                $"The deposit address {Row.DepositAddress} of Satora stablecoin swap {Id} still holds 0.5 USDC. Enter a refund address for it on Satora's Stablecoin refunds page."),
+            _credit.Notes[^1]);
+
+        _worker.Clock += SatoraStableWorker.SweepCheckInterval;
+        await _worker.TickAsync(Store, Ct);
+        Assert.Equal(1, _wallets.Transfers);
+
+        Row.SweepDestination = storeAddress;
+        _worker.Clock += SatoraStableWorker.SweepCheckInterval;
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.Equal($"sweep {Id} {storeAddress} ", _events.Last(e => e.StartsWith("sweep ")));
+        Assert.Equal(2, _wallets.Transfers);
+        Assert.True(Row is { SweepTxHash: "0xsweep-2", CompletedAt: not null });
+    }
+
+    [Fact]
+    public async Task TooLittleGasForTheSdksEstimateAlertsAsNoGas()
+    {
+        WaitingForSweep(SatoraStableRefundsTests.Customer);
+        _wallets.Held[(Id, null)] = 500_000;
+        _wallets.Gas[Id] = 1;
+        _wallets.SweepError = new SdkException(SdkErrorKind.InsufficientGas, "the depositor holds 1 wei and the transaction needs up to 900 wei; send it gas first");
+
+        for (var i = 0; i < 3; i++)
+        {
+            await _worker.TickAsync(Store, Ct);
+            _worker.Clock += SatoraStableWorker.SweepCheckInterval;
+        }
+
+        Assert.Equal([Problems.GasNeeded], _worker.Sent.Select(n => n.Problem));
+        Assert.True(Row is { SweepAttempted: true, CompletedAt: null });
+    }
+
+    [Fact]
+    public async Task ASweepFailingTwiceAlertsOnce()
+    {
+        WaitingForSweep(SatoraStableRefundsTests.Customer);
+        _wallets.Held[(Id, null)] = 500_000;
+        _wallets.Gas[Id] = 1;
+        _wallets.SweepError = new SdkException(SdkErrorKind.Transport, "node unreachable");
+
+        for (var i = 0; i < 3; i++)
+        {
+            await _worker.TickAsync(Store, Ct);
+            _worker.Clock += SatoraStableWorker.SweepCheckInterval;
+        }
+
+        Assert.Equal(3, _events.Count(e => e.StartsWith("sweep ")));
+        Assert.Equal([Problems.SweepFailing], _worker.Sent.Select(n => n.Problem));
+        Assert.Null(Row.CompletedAt);
+    }
+
+    // A signature signed before the swap was reopened for a sweep can still pull the deposit.
+    [Fact]
+    public async Task ASweepWaitsWithoutAlertingWhileARelaySignatureCanStillPullTheDeposit()
+    {
+        WaitingForSweep(SatoraStableRefundsTests.Customer);
+        _wallets.Held[(Id, null)] = 500_000;
+        _wallets.Gas[Id] = 1;
+        _wallets.SweepError = new SdkException(SdkErrorKind.UnresolvedFunding, "a relay funding signature can still pull the deposit");
+
+        for (var i = 0; i < 3; i++)
+        {
+            await _worker.TickAsync(Store, Ct);
+            _worker.Clock += SatoraStableWorker.SweepCheckInterval;
+        }
+
+        Assert.Empty(_worker.Sent);
+        Assert.Null(Row.CompletedAt);
+    }
+
+    // The SDK lost the transfer's hash and finds nothing left to move: that transfer moved it.
+    [Fact]
+    public async Task AnEmptyAddressAfterASweepWhoseHashWasNotRecordedClosesTheSwap()
+    {
+        WaitingForSweep(SatoraStableRefundsTests.Customer);
+        Row.SweepAttempted = true;
+        _wallets.Gas[Id] = 1;
+
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.True(Row is { ClosedReason: SatoraStableRefunds.SweepUnrecordedReason, CompletedAt: not null, SweepTxHash: null });
+        var note = Assert.Single(_credit.Notes);
+        Assert.Equal(InvoiceEventData.EventSeverity.Warning, note.Severity);
+        Assert.Contains("its transaction was not recorded", note.Message);
+    }
+
+    [Fact]
+    public async Task AnAddressHoldingNothingWorthTheGasIsNotSwept()
+    {
+        WaitingForSweep(SatoraStableRefundsTests.Customer);
+        _wallets.Held[(Id, null)] = 9_999;
+        _wallets.Gas[Id] = 1;
+
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.Equal([$"funds {Id}"], _events);
+        Assert.True(Row is { SweepAttempted: false, CompletedAt: null });
+        Assert.Empty(_worker.Sent);
+    }
+
+    // The owner dismissed the swap after the tick listed it: the swap is read again under the hold.
+    [Fact]
+    public async Task ASwapDismissedAfterTheTickReadItIsNotSwept()
+    {
+        WaitingForSweep(SatoraStableRefundsTests.Customer);
+        _wallets.Held[(Id, null)] = 500_000;
+        _wallets.Gas[Id] = 1;
+        _swaps.BeforeFind = () => Row.CompletedAt = _worker.Clock;
+
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.Empty(_events);
+        Assert.False(Row.SweepAttempted);
+    }
+
     private void Open(SdkSwapStatus? status, bool fundingAttempted = false, bool paymentRecorded = false, string? claimTxId = null, bool credited = false)
     {
         var swap = SatoraStableIntegrationTests.Swap(Store, "swap");
@@ -915,6 +1175,15 @@ public class SatoraStableWorkerTests
             _wallets.Statuses[Id] = status;
     }
 
+    private void WaitingForSweep(string destination, string? token = null)
+    {
+        Open(null);
+        Row.NeedsAttentionAt = _worker.Clock;
+        Row.AttentionReason = SatoraStableAttention.Sweep;
+        Row.SweepDestination = destination;
+        Row.SweepToken = token;
+    }
+
     private sealed class MemorySwaps() : SatoraStableSwaps(null!)
     {
         public Dictionary<string, SatoraStableSwap> Rows { get; } = [];
@@ -924,6 +1193,32 @@ public class SatoraStableWorkerTests
             Task.FromResult(Rows.Values.Where(s => s.StoreId == storeId && s.CompletedAt == null).Select(Copy).ToList());
 
         private static SatoraStableSwap Copy(SatoraStableSwap row) => JsonSerializer.Deserialize<SatoraStableSwap>(JsonSerializer.Serialize(row))!;
+
+        public Action? BeforeFind { get; set; }
+
+        public int SweepStarts { get; private set; }
+
+        public override Task<SatoraStableSwap?> FindAsync(string storeId, string swapId)
+        {
+            BeforeFind?.Invoke();
+            return Task.FromResult(Rows.TryGetValue(swapId, out var row) && row.StoreId == storeId ? Copy(row) : null);
+        }
+
+        public override Task<bool> TryStartSweepAsync(string swapId, string destination, string? token) =>
+            Guarded(swapId, row => row is { SweepTxHash: null, CompletedAt: null } && row.SweepDestination == destination && row.SweepToken == token, row =>
+            {
+                SweepStarts++;
+                row.SweepAttempted = true;
+            });
+
+        public override Task SetSweepTxHashAsync(string swapId, string txHash) => Set(swapId, row => row.SweepTxHash = txHash);
+
+        public override Task<bool> ResetSweepToOwnTokenAsync(string swapId, string sweptToken) =>
+            Guarded(swapId, row => row.SweepToken == sweptToken && row.CompletedAt is null, row =>
+            {
+                row.SweepToken = row.SweepDestination = row.SweepTxHash = null;
+                row.SweepAttempted = false;
+            });
 
         public override Task SetStatusAsync(string swapId, SatoraSwapStatus status) => Set(swapId, row => row.Status = status);
 
@@ -945,11 +1240,13 @@ public class SatoraStableWorkerTests
                 row.VhtlcSats = vhtlcSats;
             });
 
-        public override Task<bool> SetNeedsAttentionAsync(string swapId, string? claimTxId, SatoraStableAttention reason, DateTimeOffset now) =>
+        public override Task<bool> SetNeedsAttentionAsync(string swapId, string? claimTxId, SatoraStableAttention reason, DateTimeOffset now,
+            string? sweepToken = null) =>
             Guarded(swapId, row => row is { NeedsAttentionAt: null, CompletedAt: null } && row.ClaimTxId == claimTxId, row =>
             {
                 row.NeedsAttentionAt = now;
                 row.AttentionReason = reason;
+                row.SweepToken = sweepToken;
             });
 
         public override Task<bool> SetClosedAsync(string swapId, string reason, DateTimeOffset now) =>
@@ -1004,6 +1301,16 @@ public class SatoraStableWorkerTests
         // Requests that left for the relay.
         public int Sent { get; private set; }
         public List<TimeSpan> PermitDeadlines { get; } = [];
+        // What each deposit address holds of a token, null for the swap's own, and of gas.
+        public Dictionary<(string SwapId, string? Token), BigInteger> Held { get; } = [];
+        public Dictionary<string, BigInteger> Gas { get; } = [];
+        public Exception? SweepError { get; set; }
+        // The transfer is sent and mined, and the call times out before the receipt.
+        public bool SweepThenTimeout { get; set; }
+        public Action? AfterSweep { get; set; }
+        // Transfers sent; the SDK's last settled one is returned again once its balance is gone.
+        public int Transfers { get; private set; }
+        private readonly Dictionary<string, string> _settled = [];
 
         public override Task<BulkStatus> GetBulkStatusAsync(string storeId, IEnumerable<string> swapIds, CancellationToken cancellationToken)
         {
@@ -1065,6 +1372,29 @@ public class SatoraStableWorkerTests
             Journal[swap.SwapId] = "Funded";
             Deposited[swap.SwapId] -= BigInteger.Parse(swap.SourceUnits);
             return Task.FromResult(new RelayFunding("0xfund-" + swap.SwapId, true));
+        }
+
+        public override Task<SatoraDepositorFunds> GetFundsAsync(SatoraStableSwap swap, string? token, CancellationToken cancellationToken)
+        {
+            events.Add($"funds {swap.SwapId}");
+            return Task.FromResult(new SatoraDepositorFunds(Held.GetValueOrDefault((swap.SwapId, token)), Gas.GetValueOrDefault(swap.SwapId)));
+        }
+
+        public override Task<EvmReceipt> SweepAsync(SatoraStableSwap swap, string destination, string? token, CancellationToken cancellationToken)
+        {
+            events.Add($"sweep {swap.SwapId} {destination} {token}");
+            if (SweepError is not null)
+                throw SweepError;
+            if (Held.GetValueOrDefault((swap.SwapId, token)).IsZero)
+                return _settled.TryGetValue(swap.SwapId, out var settled)
+                    ? Task.FromResult(new EvmReceipt(settled))
+                    : throw new SdkException(SdkErrorKind.InvalidSwap, "the depositor holds none of this token");
+            Held[(swap.SwapId, token)] = 0;
+            _settled[swap.SwapId] = $"0xsweep-{++Transfers}";
+            AfterSweep?.Invoke();
+            if (SweepThenTimeout)
+                throw new SdkException(SdkErrorKind.Timeout, "deposit sweep timed out; call it again to verify or resume it");
+            return Task.FromResult(new EvmReceipt(_settled[swap.SwapId]));
         }
 
         // Without a journal the SDK refuses before it reads anything.

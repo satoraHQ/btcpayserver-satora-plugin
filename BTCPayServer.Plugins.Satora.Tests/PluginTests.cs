@@ -126,13 +126,13 @@ public class PluginTests
     }
 
     [Fact]
-    public void RegistersTheStablecoinWorkerWithItsDependencies()
+    public void RegistersTheStablecoinWorkerAndRefundsPageWithTheirDependencies()
     {
         var services = new ServiceCollection();
         new Plugin().Execute(services);
 
         Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraStableWorker));
-        foreach (var dependency in new[] { typeof(SatoraStableWorker), typeof(SatoraStableWallets) }
+        foreach (var dependency in new[] { typeof(SatoraStableWorker), typeof(SatoraStableWallets), typeof(SatoraStableRefundController) }
                      .SelectMany(t => t.GetConstructors().Single().GetParameters().Select(p => p.ParameterType))
                      .Where(t => t.Assembly == typeof(Plugin).Assembly))
             Assert.Contains(services, d => d.ServiceType == dependency);

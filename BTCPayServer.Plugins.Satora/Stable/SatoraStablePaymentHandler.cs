@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.RegularExpressions;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Data;
 using BTCPayServer.Payments;
@@ -19,7 +18,7 @@ namespace BTCPayServer.Plugins.Satora.Stable;
 // Each prompt is a gasless swap from the coin to Arkade paying the amount due into the store's wallet,
 // with a deposit address of its own that the customer sends the token to. Shaped after
 // SatoraChainPaymentHandler.
-public partial class SatoraStablePaymentHandler(
+public class SatoraStablePaymentHandler(
     SatoraStablecoin coin,
     BTCPayNetwork network,
     SatoraWalletRegistry registry,
@@ -140,7 +139,7 @@ public partial class SatoraStablePaymentHandler(
         long sats, Quote quote, DateTimeOffset invoiceExpiresAt, DateTimeOffset now, out Exception? refusal)
     {
         var deposit = (created.Funding as SdkSwapFunding.Gasless)?.depositAddress;
-        if (created.Direction is not SdkSwapDirection.EvmToArkade || deposit is null || !EvmAddress().IsMatch(deposit) ||
+        if (created.Direction is not SdkSwapDirection.EvmToArkade || deposit is null || !SatoraEvmAddress.IsHex(deposit) ||
             created.VhtlcRefundLocktime is not { } vhtlcLocktime || created.EvmRefundLocktime is not { } evmLocktime)
             throw new InvalidOperationException($"The swap server returned swap {created.Id} without a valid deposit address or refund locktimes.");
         var vhtlcRefundLocktime = DateTimeOffset.FromUnixTimeSeconds(vhtlcLocktime);
@@ -177,9 +176,6 @@ public partial class SatoraStablePaymentHandler(
             row.CompletedAt = now;
         return row;
     }
-
-    [GeneratedRegex("^0x[0-9a-fA-F]{40}$")]
-    private static partial Regex EvmAddress();
 
     public SatoraStablePromptDetails ParsePaymentPromptDetails(JToken details) =>
         details.ToObject<SatoraStablePromptDetails>(Serializer) ?? throw new FormatException($"Invalid {nameof(SatoraStablePromptDetails)}");

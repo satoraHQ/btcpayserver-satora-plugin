@@ -163,11 +163,11 @@ public class SatoraStableIntegrationTests(SatoraWalletIntegrationTests.Database 
         Assert.True(await Swaps.SetNeedsAttentionAsync(unclaimed.SwapId, null, SatoraStableAttention.Sweep, Now));
         Assert.False(await Swaps.SetNeedsAttentionAsync(unclaimed.SwapId, null, SatoraStableAttention.HtlcRefund, Now.AddMinutes(1)));
         Assert.False(await Swaps.SetNeedsAttentionAsync(claimed.SwapId, null, SatoraStableAttention.Sweep, Now));
-        Assert.True(await Swaps.SetNeedsAttentionAsync(claimed.SwapId, "ark", SatoraStableAttention.Sweep, Now));
+        Assert.True(await Swaps.SetNeedsAttentionAsync(claimed.SwapId, "ark", SatoraStableAttention.Sweep, Now, "0xlocked"));
         Assert.False(await Swaps.SetNeedsAttentionAsync(done.SwapId, null, SatoraStableAttention.Sweep, Now));
 
-        Assert.True(await Swaps.FindAsync("attention", unclaimed.SwapId) is { AttentionReason: SatoraStableAttention.Sweep, NeedsAttentionAt: not null });
-        Assert.True(await Swaps.FindAsync("attention", claimed.SwapId) is { AttentionReason: SatoraStableAttention.Sweep, ClaimTxId: "ark" });
+        Assert.True(await Swaps.FindAsync("attention", unclaimed.SwapId) is { AttentionReason: SatoraStableAttention.Sweep, NeedsAttentionAt: not null, SweepToken: null });
+        Assert.True(await Swaps.FindAsync("attention", claimed.SwapId) is { AttentionReason: SatoraStableAttention.Sweep, ClaimTxId: "ark", SweepToken: "0xlocked" });
         Assert.True(await Swaps.FindAsync("attention", done.SwapId) is { NeedsAttentionAt: null, AttentionReason: null });
     }
 
@@ -214,6 +214,36 @@ public class SatoraStableIntegrationTests(SatoraWalletIntegrationTests.Database 
     }
 
     [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task TheSwapsOwnTokenGetsASweepOfItsOwnOnlyAfterTheSweepTheWorkerSent()
+    {
+        var swap = Swap("own-token", "swap");
+        var closed = Swap("own-token", "closed");
+        foreach (var s in new[] { swap, closed })
+        {
+            await Swaps.AddAsync(s);
+            await Swaps.SetNeedsAttentionAsync(s.SwapId, null, SatoraStableAttention.Sweep, Now);
+            await Swaps.RequestSweepAsync("own-token", s.SwapId, "0xfirst", "0xtoken");
+            await Swaps.TryStartSweepAsync(s.SwapId, "0xfirst", "0xtoken");
+            await Swaps.SetSweepTxHashAsync(s.SwapId, "0xsweep");
+        }
+        await Swaps.SetCompletedAsync(closed.SwapId, Now);
+
+        Assert.False(await Swaps.ResetSweepToOwnTokenAsync(swap.SwapId, "0xother"));
+        Assert.False(await Swaps.ResetSweepToOwnTokenAsync(closed.SwapId, "0xtoken"));
+        Assert.True(await Swaps.ResetSweepToOwnTokenAsync(swap.SwapId, "0xtoken"));
+        Assert.False(await Swaps.ResetSweepToOwnTokenAsync(swap.SwapId, "0xtoken"));
+
+        Assert.True(await Swaps.FindAsync("own-token", swap.SwapId) is
+        {
+            CompletedAt: null, AttentionReason: SatoraStableAttention.Sweep, NeedsAttentionAt: not null, SweepToken: null, SweepDestination: null,
+            SweepAttempted: false, SweepTxHash: null
+        });
+        Assert.True(await Swaps.FindAsync("own-token", closed.SwapId) is { SweepToken: "0xtoken", SweepTxHash: "0xsweep", CompletedAt: not null });
+        Assert.True(await Swaps.RequestSweepAsync("own-token", swap.SwapId, "0xsecond", null));
+        Assert.True(await Swaps.TryStartSweepAsync(swap.SwapId, "0xsecond", null));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
     public async Task TheWorkerClosesOnlyASwapStillOpen()
     {
         var empty = Swap("close", "empty");
@@ -229,6 +259,86 @@ public class SatoraStableIntegrationTests(SatoraWalletIntegrationTests.Database 
 
         Assert.True(await Swaps.FindAsync("close", empty.SwapId) is { ClosedReason: "Empty" } e && e.CompletedAt == Now);
         Assert.True(await Swaps.FindAsync("close", done.SwapId) is { ClosedReason: null } d && d.CompletedAt == Now);
+    }
+
+    // A deposit in the HTLC still has to be refunded, so only tokens at the address can be dismissed.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task TheOwnerDismissesOnlyTokensStillWaitingAtTheAddress()
+    {
+        var sweep = Swap("dismiss", "sweep");
+        var htlc = Swap("dismiss", "htlc");
+        var open = Swap("dismiss", "open");
+        foreach (var swap in new[] { sweep, htlc, open })
+            await Swaps.AddAsync(swap);
+        await Swaps.SetNeedsAttentionAsync(sweep.SwapId, null, SatoraStableAttention.Sweep, Now);
+        await Swaps.SetNeedsAttentionAsync(htlc.SwapId, null, SatoraStableAttention.HtlcRefund, Now);
+
+        Assert.False(await Swaps.DismissAsync("dismiss-other", sweep.SwapId, Now));
+        Assert.False(await Swaps.DismissAsync("dismiss", htlc.SwapId, Now));
+        Assert.False(await Swaps.DismissAsync("dismiss", open.SwapId, Now));
+        Assert.True(await Swaps.DismissAsync("dismiss", sweep.SwapId, Now));
+        Assert.False(await Swaps.DismissAsync("dismiss", sweep.SwapId, Now.AddMinutes(1)));
+
+        Assert.True(await Swaps.FindAsync("dismiss", sweep.SwapId) is { ClosedReason: SatoraStableRefunds.DismissedReason } d && d.CompletedAt == Now);
+        Assert.True(await Swaps.FindAsync("dismiss", htlc.SwapId) is { CompletedAt: null });
+        Assert.True(await Swaps.FindAsync("dismiss", open.SwapId) is { CompletedAt: null, ClosedReason: null });
+    }
+
+    // Reopened only as the reader saw it closed, with where to send the tokens left for the owner to
+    // enter again. The reader proves that the current wallet holds the address's key, so a swap from
+    // before the wallet was created, as after a replaced phrase was restored, is reopened too, and a
+    // replace then counts it.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task AClosedSwapIsReopenedForASweepOnlyAsItWasRead()
+    {
+        var (_, wallets) = db.Wallets();
+        var (_, phrase) = await wallets.GenerateAsync("reopen", null);
+        Assert.True(await wallets.ConfirmBackupAsync("reopen", phrase));
+        var swept = Swap("reopen", "swept", createdAt: DateTimeOffset.UtcNow);
+        var earlier = Swap("reopen", "earlier", createdAt: Now.AddDays(-1));
+        foreach (var swap in new[] { swept, earlier })
+            await Swaps.AddAsync(swap);
+        await Swaps.SetNeedsAttentionAsync(swept.SwapId, null, SatoraStableAttention.Sweep, Now);
+        await Swaps.RequestSweepAsync("reopen", swept.SwapId, "0xfirst", null);
+        await Swaps.TryStartSweepAsync(swept.SwapId, "0xfirst", null);
+        await Swaps.SetSweepTxHashAsync(swept.SwapId, "0xsweep");
+        await Swaps.SetCompletedAsync(swept.SwapId, Now);
+        await Swaps.SetClosedAsync(earlier.SwapId, "Unfunded", Now);
+
+        Assert.False(await Swaps.ReopenForSweepAsync("reopen", swept.SwapId, Now.AddSeconds(-1), null, Now.AddHours(1)));
+        Assert.False(await Swaps.ReopenForSweepAsync("reopen-other", swept.SwapId, Now, null, Now.AddHours(1)));
+        Assert.True(await Swaps.ReopenForSweepAsync("reopen", swept.SwapId, Now, "0xtoken", Now.AddHours(1)));
+        Assert.False(await Swaps.ReopenForSweepAsync("reopen", swept.SwapId, Now, null, Now.AddHours(2)));
+
+        var reopened = await Swaps.FindAsync("reopen", swept.SwapId);
+        Assert.True(reopened is
+        {
+            CompletedAt: null, ClosedReason: null, AttentionReason: SatoraStableAttention.Sweep, SweepToken: "0xtoken",
+            SweepDestination: null, SweepAttempted: false, SweepTxHash: null
+        } && reopened.NeedsAttentionAt == Now.AddHours(1));
+        Assert.Equal(1, await wallets.CountOpenOperationsAsync("reopen"));
+        Assert.True(await Swaps.RequestSweepAsync("reopen", swept.SwapId, "0xsecond", "0xtoken"));
+
+        Assert.True(await Swaps.ReopenForSweepAsync("reopen", earlier.SwapId, Now, null, DateTimeOffset.UtcNow));
+        Assert.Equal(2, await wallets.CountOpenOperationsAsync("reopen"));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task FindsAStoresSwapsByTheirIdOrTheirInvoice()
+    {
+        var first = Swap("find", "first", createdAt: Now.AddDays(-1));
+        var renewed = Swap("find", "renewed", createdAt: DateTimeOffset.UtcNow);
+        var other = Swap("find-other", "other");
+        foreach (var swap in new[] { renewed, first, other })
+        {
+            swap.InvoiceId = "find-invoice";
+            await Swaps.AddAsync(swap);
+        }
+
+        Assert.Equal([first.SwapId, renewed.SwapId], (await Swaps.FindByIdAsync("find", "find-invoice")).Select(s => s.SwapId));
+        Assert.Equal([renewed.SwapId], (await Swaps.FindByIdAsync("find", renewed.SwapId)).Select(s => s.SwapId));
+        Assert.Empty(await Swaps.FindByIdAsync("find", other.SwapId));
+        Assert.Equal([other.SwapId], (await Swaps.FindByIdAsync("find-other", other.SwapId)).Select(s => s.SwapId));
     }
 
     // A replace would strand them: only the store's current seed can fund, claim or sweep its swaps.
@@ -252,7 +362,7 @@ public class SatoraStableIntegrationTests(SatoraWalletIntegrationTests.Database 
 
         Assert.Equal(1, await wallets.CountOpenOperationsAsync("count-stable"));
         Assert.Equal(SeedWriteRefusal.OpenOperations, (await wallets.GenerateAsync("count-stable", SeedWriteGuard.ConfirmationWord)).Refusal);
-        Assert.Equal("stablecoin deposits to send back for invoices: invoice-sweep", await wallets.DescribeOpenOperationsAsync("count-stable"));
+        Assert.Equal("deposits on the Stablecoin refunds page for invoices: invoice-sweep", await wallets.DescribeOpenOperationsAsync("count-stable"));
     }
 
     // The handler would make a swap through the store's wallet: no quote is read and no row written while

@@ -332,6 +332,10 @@ claim, and links a payment taken off the invoice to the refunds page.
 
 ## Stablecoin payments
 
+Turning USDC on needs a store payment tolerance of at least 1%. Off mainnet,
+`BTCPAY_SATORA_EVMRPC_ARBITRUM` must name the Arbitrum node. To send tokens
+back, the store first sends the deposit address a little ETH for gas.
+
 Turn on **USDC on Arbitrum (Satora)** (`BTC-SATORA-USDC-ARBITRUM`) on the
 Satora page. It is offered while the wallet is enabled. USDC on Polygon is not
 offered, because the swap server is retiring Polygon as a direct chain. Turning
@@ -415,16 +419,18 @@ said to expect, so against a dishonest swap server only the tolerance limits
 the shortfall.
 
 Tokens a swap does not use stay at the deposit address, which only the Satora
-wallet controls. Nothing leaves a deposit address while a relay signature can
-still pull from it. BTCPay notifies the store about:
+wallet controls, until the store sends them back (see
+[Stablecoin refunds](#stablecoin-refunds)). Nothing leaves a deposit address
+while a relay signature can still pull from it. BTCPay notifies the store
+about:
 
 - tokens sent beyond the deposit, which the invoice's Events also note
 - a deposit not funded by the funding cutoff
 - a deposit sent after the swap expired.
 
 If the swap server does not complete a funding, or the wallet cannot claim its
-VHTLC in time, the deposit stays locked in the swap's HTLC, which the plugin's
-alerts call the swap contract. From the HTLC's refund locktime, 24 hours after
+VHTLC in time, the deposit stays locked in the swap's HTLC, which the Satora
+pages call the swap contract. From the HTLC's refund locktime, 24 hours after
 the swap was made, it can be refunded to the deposit address in the token the
 HTLC locked. To make that refund, contact Satora support at support@satora.io
 with the swap id. A payment already on the invoice comes off it.
@@ -444,6 +450,62 @@ Set `BTCPAY_SATORA_EVMRPC_ARBITRUM` (or `satora_evmrpc_arbitrum=` in
 the chain's public nodes, which rate-limit. Off mainnet the chain is a test
 fork, so until the setting is there the method gets no prompt and open swaps
 are not read.
+
+### Stablecoin refunds
+
+The **Stablecoin refunds** page lists the swaps whose tokens the store has to
+send back, with what each deposit address holds of the token and of gas:
+
+- a deposit not funded by the funding cutoff
+- a deposit sent after the swap expired
+- the excess of an overpayment, once its swap completes
+- the token an HTLC refund returned to the deposit address. This is tBTC on
+  Arbitrum One, not the customer's USDC, and the page fills it in as the token
+  to send.
+
+To send tokens back, someone who can change the store's settings:
+
+1. Asks the customer for an address on Arbitrum One and enters it.
+2. Types `REFUND`.
+3. Sends the deposit address about 0.0001 ETH on Arbitrum One for gas, from any
+   wallet.
+
+Within a minute of the gas arriving, the address's whole balance of the token
+goes to the customer's address. Gas the transfer does not use stays at the
+deposit address. Only the Satora wallet can sign for a deposit address. BTCPay
+notifies the store while the address has no gas, and when sending fails twice.
+A token sent to the address by mistake goes back the same way, with its
+contract entered beside the customer's address.
+
+The address and token can be changed until the first attempt. After that, an
+attempt cut short by a timeout or a restart is verified, not sent again. The
+swap closes once its transfer is mined and the address holds less than a
+hundredth of the token. Tokens that arrive before then go to the same address.
+After another token has gone back, a hundredth or more of the swap's own token
+still at the address keeps the swap listed, and its destination has to be
+entered again. The invoice's Events note each transfer. Nothing is sent until
+the store enters an address, and the wallet cannot be replaced while a swap is
+listed.
+
+If the store will not send tokens back, for example because it paid the
+customer another way, type `DISMISS` under the swap. The swap is no longer
+followed and nothing more is sent from its address. BTCPay's log records the
+dismissal. A dismissal is refused while a transfer for the swap runs. Try again
+a minute later.
+
+A closed swap's deposit address is no longer watched. If tokens reach one
+anyway, for example from a slow exchange withdrawal or a customer paying a
+saved address again, use **Check a deposit address**. Enter the swap id, or the
+invoice id to check all of its swaps. For a token other than the swap's, enter
+its contract too. If the address holds a hundredth of the token or more, or any
+amount of another token, the swap is listed again to send back as above, and
+the invoice's Events note it. Only swaps of the store's current wallet can be
+checked. A swap a replaced wallet made, or any swap once the store's SDK data
+is lost, cannot.
+
+The page also lists a swap whose deposit is locked in its HTLC, with the time
+its refund becomes possible. To make that refund, contact Satora support at
+support@satora.io with the swap id.
 
 ## Withdrawals
 

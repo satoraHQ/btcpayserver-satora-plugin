@@ -1,0 +1,137 @@
+@using System.Globalization
+@using BTCPayServer.Abstractions.Extensions
+@using BTCPayServer.Abstractions.Models
+@using BTCPayServer.Plugins.Satora.Models
+@using BTCPayServer.Plugins.Satora.Stable
+@using BTCPayServer.Plugins.Satora.Views
+
+@model BTCPayServer.Plugins.Satora.Models.SatoraStableRefundPageModel
+@{
+    ViewData.SetLayoutModel(new LayoutModel(nameof(PluginNavPages.Index), "Satora stablecoin refunds")
+    { ActiveCategory = nameof(PluginNavPages) });
+    string At(DateTimeOffset time) => time.ToString("u", CultureInfo.InvariantCulture);
+}
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <h2 class="mb-0">Stablecoin refunds</h2>
+    <a asp-controller="SatoraPlugin" asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">Back to Satora</a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<p>
+    These stablecoin payments did not count toward their invoice, or left extra tokens at their deposit address. To refund one, enter the customer's address
+    on the same network and send the gas shown to its deposit address. The refund sends everything the deposit address holds of the token.
+    <a href="https://github.com/satoraHQ/btcpayserver-satora-plugin#stablecoin-refunds" target="_blank" rel="noreferrer noopener">How stablecoin refunds work</a>
+</p>
+
+@if (!Model.Swaps.Any())
+{
+    <p><i>No stablecoin payment needs a refund.</i></p>
+}
+@foreach (var swap in Model.Swaps)
+{
+    var chain = SatoraStableRefunds.ChainName(swap.ChainId);
+    <div class="border rounded p-3 mb-3">
+        <div class="d-flex flex-wrap gap-4 mb-2">
+            <div><span class="text-secondary">Swap</span> <code>@swap.SwapId</code></div>
+            <div>
+                <span class="text-secondary">Invoice</span>
+                <a asp-controller="UIInvoice" asp-action="Invoice" asp-route-invoiceId="@swap.InvoiceId">@swap.InvoiceId</a>
+            </div>
+            <div><span class="text-secondary">Why</span> @SatoraStableRefunds.Describe(swap.AttentionReason)</div>
+            <div><span class="text-secondary">Network</span> @chain</div>
+        </div>
+        <div class="text-break mb-2">
+            <span class="text-secondary">Deposit address</span> <code>@swap.DepositAddress</code>
+            <button type="button" class="btn btn-link p-0 ms-1 clipboard-button" data-clipboard="@swap.DepositAddress">Copy</button>
+        </div>
+        @if (swap.AttentionReason == SatoraStableAttention.HtlcRefund)
+        {
+            <div class="alert alert-warning mb-0">
+                This deposit is locked in the swap contract. To refund it, contact <a href="https://github.com/satoraHQ/btcpayserver-satora-plugin#support" target="_blank" rel="noreferrer noopener">Satora support</a> at <a href="mailto:support@satora.io">support@satora.io</a> with the swap id.
+                From @At(swap.EvmRefundLocktime) it can be refunded to the deposit address in tBTC, not in the token the customer sent.
+            </div>
+        }
+        else
+        {
+            <div class="d-flex flex-wrap gap-4 mb-2">
+                <div><span class="text-secondary">Token</span> @(swap.SweepToken is null ? swap.Token : swap.SweepToken)</div>
+                @if (Model.Funds.GetValueOrDefault(swap.SwapId) is { } funds)
+                {
+                    <div><span class="text-secondary">At the address</span> @SatoraStableRefunds.Amount(swap, swap.SweepToken, funds.TokenUnits)</div>
+                    <div><span class="text-secondary">Gas at the address</span> @SatoraStableRefunds.Native(swap.ChainId, funds.NativeWei)</div>
+                }
+                else
+                {
+                    <div><span class="text-secondary">At the address</span> <i>could not be read</i></div>
+                }
+            </div>
+            @if (swap.SweepTxHash is not null)
+            {
+                <div class="alert alert-info mb-2">Refunded to <code>@swap.SweepDestination</code> in <code>@swap.SweepTxHash</code>. Any more tokens at the deposit address go there too.</div>
+            }
+            else if (swap.SweepAttempted)
+            {
+                <div class="alert alert-info mb-2">Sending the refund to <code>@swap.SweepDestination</code>. It needs gas at the deposit address. Failed attempts are retried automatically.</div>
+            }
+            else
+            {
+                <div class="mb-2">
+                    Send about @SatoraStableRefunds.GasToSend(swap.ChainId) to the deposit address from any wallet to pay the refund's gas. Gas the refund does not use stays at that address.
+                </div>
+                @if (swap.SweepDestination is not null)
+                {
+                    <div class="mb-2">Refund requested to <code>@swap.SweepDestination</code>. The address can be changed until the refund starts.</div>
+                }
+                <form method="post" asp-action="RequestRefund" asp-route-storeId="@Model.StoreId" asp-route-swapId="@swap.SwapId" class="d-flex flex-wrap gap-2 align-items-end">
+                    <div class="flex-grow-1">
+                        <label for="Destination@(swap.SwapId)" class="form-label">Customer's address on @chain</label>
+                        <input id="Destination@(swap.SwapId)" name="Destination" class="form-control font-monospace" autocomplete="off" spellcheck="false" />
+                    </div>
+                    <div class="flex-grow-1">
+                        <label for="Token@(swap.SwapId)" class="form-label">Token contract, if not @swap.Token</label>
+                        <input id="Token@(swap.SwapId)" name="Token" value="@swap.SweepToken" class="form-control font-monospace" autocomplete="off" spellcheck="false" />
+                    </div>
+                    <div>
+                        <label for="Confirmation@(swap.SwapId)" class="form-label">Type @SatoraStableRefunds.ConfirmationWord</label>
+                        <input id="Confirmation@(swap.SwapId)" name="Confirmation" class="form-control" autocomplete="off" />
+                    </div>
+                    <button type="submit" class="btn btn-primary">Refund</button>
+                </form>
+            }
+            <details class="mt-3">
+                <summary class="text-secondary">Dismiss without refunding</summary>
+                <form method="post" asp-action="Dismiss" asp-route-storeId="@Model.StoreId" asp-route-swapId="@swap.SwapId" class="d-flex flex-wrap gap-2 align-items-end mt-2">
+                    <div>
+                        <label for="Dismiss@(swap.SwapId)" class="form-label">Type @SatoraStableRefunds.DismissWord</label>
+                        <input id="Dismiss@(swap.SwapId)" name="Confirmation" class="form-control" autocomplete="off" />
+                    </div>
+                    <button type="submit" class="btn btn-outline-danger">Dismiss</button>
+                </form>
+                <div class="form-text">
+                    Dismiss only if the customer was paid back another way, or the amount is not worth the gas.
+                    @(swap.SweepAttempted ? "Nothing more is sent from the deposit address. A refund already started can still be mined."
+                        : "The tokens at the deposit address are never sent back.")
+                </div>
+            </details>
+        }
+    </div>
+}
+
+<h4 class="mt-4">Check a deposit address</h4>
+<p>
+    Tokens sent to a closed swap's deposit address are not detected. If a customer says they sent some, enter the swap or invoice id to check.
+    A swap whose address holds tokens is listed above again.
+</p>
+<form method="post" asp-action="CheckAddress" asp-route-storeId="@Model.StoreId" class="d-flex flex-wrap gap-2 align-items-end mb-4">
+    <div class="flex-grow-1">
+        <label for="CheckId" class="form-label">Swap or invoice id</label>
+        <input id="CheckId" name="Id" class="form-control font-monospace" autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="flex-grow-1">
+        <label for="CheckToken" class="form-label">Token contract, if not the swap's token</label>
+        <input id="CheckToken" name="Token" class="form-control font-monospace" autocomplete="off" spellcheck="false" />
+    </div>
+    <button type="submit" class="btn btn-outline-primary">Check</button>
+</form>

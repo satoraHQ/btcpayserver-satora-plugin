@@ -64,6 +64,7 @@ public class SatoraPluginControllerTests
     [Theory]
     [InlineData(typeof(SatoraWithdrawController))]
     [InlineData(typeof(SatoraChainRefundController))]
+    [InlineData(typeof(SatoraStableRefundController))]
     public void WithdrawalsNeedTheStoreSettingsPermissionAndAnAntiforgeryToken(Type controller)
     {
         Assert.Equal([Policies.CanModifyStoreSettings], controller.GetCustomAttributes<AuthorizeAttribute>().Select(a => a.Policy));

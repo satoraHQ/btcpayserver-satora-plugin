@@ -241,7 +241,7 @@ public class SatoraWalletService(
             await open.ChainSwaps.Where(s => s.NeedsRefundAt != null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
         Add("stablecoin swaps of invoices",
             await open.StableSwaps.Where(s => s.NeedsAttentionAt == null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
-        Add("stablecoin deposits to send back for invoices",
+        Add("deposits on the Stablecoin refunds page for invoices",
             await open.StableSwaps.Where(s => s.NeedsAttentionAt != null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
         Add("withdrawals to mark sent or failed on the withdrawals page",
             await open.Withdrawals.OrderBy(w => w.CreatedAt).Select(w => w.Id).ToListAsync());
@@ -284,7 +284,9 @@ public class SatoraWalletService(
             lightningSwaps = lightningSwaps.Where(s => s.CreatedAt >= created);
             withdrawals = withdrawals.Where(w => w.CreatedAt >= created);
             chainSwaps = chainSwaps.Where(s => s.CreatedAt >= created);
-            stableSwaps = stableSwaps.Where(s => s.CreatedAt >= created);
+            // A swap of a replaced phrase restored since, listed again for a sweep, predates the
+            // wallet's creation but not its listing.
+            stableSwaps = stableSwaps.Where(s => s.CreatedAt >= created || s.NeedsAttentionAt >= created);
         }
         return new OpenOperations(swaps, lightningSwaps, withdrawals, chainSwaps, stableSwaps);
     }

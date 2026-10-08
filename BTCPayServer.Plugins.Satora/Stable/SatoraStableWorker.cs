@@ -17,9 +17,9 @@ namespace BTCPayServer.Plugins.Satora.Stable;
 // server's relay with a signature of the store's key. The SDK journals every relay attempt and signs
 // one Permit2 nonce per swap, so its journal, not this worker, decides whether an attempt may still
 // land: the worker calls the relay whenever the deposit is there before the funding cutoff, and
-// reconciles only when the SDK says an earlier request may have gone out. Nothing but the relay's
-// funding moves tokens from a deposit address here; what a swap will not take waits for the owner.
-// Once the worker is stopping no funding or claim starts.
+// reconciles only when the SDK says an earlier request may have gone out. What a swap will not take
+// waits for the owner, and leaves the deposit address only for the destination the owner entered.
+// Once the worker is stopping no funding, claim or sweep starts.
 public class SatoraStableWorker(
     SatoraStableSwaps swaps,
     SatoraStableWallets wallets,
@@ -30,6 +30,8 @@ public class SatoraStableWorker(
 {
     public static readonly TimeSpan Interval = TimeSpan.FromSeconds(15);
     public static readonly TimeSpan StatusFailureAlertAfter = TimeSpan.FromMinutes(30);
+    // A sweep goes out within this of the owner's gas arriving at the deposit address.
+    public static readonly TimeSpan SweepCheckInterval = TimeSpan.FromMinutes(1);
     // How often a relay funding whose transaction is not recorded is looked up once the swap server
     // has moved past Pending.
     public static readonly TimeSpan FundingLookupInterval = TimeSpan.FromMinutes(1);
@@ -45,7 +47,9 @@ public class SatoraStableWorker(
     // and nothing new signed for them, until the SDK says what became of it.
     private readonly ConcurrentDictionary<string, bool> _relayUnresolved = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _nextLateRead = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _nextSweepCheck = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _nextFundingLookup = new();
+    private readonly ConcurrentDictionary<string, int> _sweepFailures = new();
     private readonly SatoraOnceAlerts _alerts = new(sentAlerts, "stable", logger);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _statusFailingSince = new();
 
@@ -89,10 +93,23 @@ public class SatoraStableWorker(
 
     internal async Task TickAsync(string storeId, CancellationToken stoppingToken)
     {
-        // A swap waiting for the owner is the owner's to act on.
-        var active = (await swaps.ListOpenAsync(storeId, stoppingToken)).Where(s => s.NeedsAttentionAt is null).ToList();
-        if (active.Count == 0)
-            return;
+        var open = await swaps.ListOpenAsync(storeId, stoppingToken);
+        // Fundings and claims have deadlines, so they go before the sweeps.
+        var active = open.Where(s => s.NeedsAttentionAt is null).ToList();
+        if (active.Count > 0)
+            await ActiveTickAsync(storeId, active, stoppingToken);
+        // A sweep needs only the owner's destination, gas at the deposit address and the SDK. Any other
+        // swap waiting for the owner is the owner's to act on.
+        foreach (var swap in open.Where(s => s is { AttentionReason: SatoraStableAttention.Sweep, NeedsAttentionAt: not null, SweepDestination: not null }))
+        {
+            if (stoppingToken.IsCancellationRequested)
+                return;
+            await Guarded(swap, () => SweepTickAsync(swap, stoppingToken), stoppingToken);
+        }
+    }
+
+    private async Task ActiveTickAsync(string storeId, List<SatoraStableSwap> active, CancellationToken stoppingToken)
+    {
         BulkStatus bulk;
         try
         {
@@ -425,7 +442,7 @@ public class SatoraStableWorker(
         var amount = $"{SatoraStableActions.FormatUnits(excess, swap.Decimals)} {swap.Token}";
         logger.LogWarning("Satora stablecoin swap {SwapId} of store {StoreId} was sent {Excess} more than its deposit", swap.SwapId, swap.StoreId, amount);
         await credit.NoteAsync(swap,
-            $"The customer sent {amount} more than Satora stablecoin swap {swap.SwapId} asked for. The extra stays at the deposit address {swap.DepositAddress}.",
+            $"The customer sent {amount} more than Satora stablecoin swap {swap.SwapId} asked for. The extra stays at the deposit address {swap.DepositAddress} and can be refunded from Satora's Stablecoin refunds page once the swap completes.",
             InvoiceEventData.EventSeverity.Warning);
         await SendAsync(new SatoraStableNotification
         {
@@ -572,10 +589,11 @@ public class SatoraStableWorker(
         await ForgetAsync(swap);
     }
 
+    // An HTLC's refund pays the deposit address the token the HTLC locked, not the one the customer sent.
     private Task NeedsSweepAsync(SatoraStableSwap swap, string reason, DateTimeOffset now) =>
         ToOwnerAsync(swap, SatoraStableAttention.Sweep, reason, Problems.NeedsSweep, null,
-            $"Tokens at the deposit address {swap.DepositAddress} of Satora stablecoin swap {swap.SwapId} do not pay the invoice ({SatoraStableActions.Describe(reason)}). They stay at that address.",
-            now);
+            $"Tokens at the deposit address {swap.DepositAddress} of Satora stablecoin swap {swap.SwapId} do not pay the invoice ({SatoraStableActions.Describe(reason)}). Refund them from Satora's Stablecoin refunds page.",
+            now, reason == SatoraStableActions.HtlcRefundedReason ? SatoraStableRefunds.HtlcToken(swap.ChainId) : null);
 
     private Task NeedsHtlcRefundAsync(SatoraStableSwap swap, string reason, DateTimeOffset now) =>
         ToOwnerAsync(swap, SatoraStableAttention.HtlcRefund, reason, Problems.NeedsHtlcRefund, swap.EvmRefundLocktime,
@@ -585,12 +603,12 @@ public class SatoraStableWorker(
     // A payment the swap will not settle comes off the invoice first, and the swap's address off the
     // invoice's prompt, so a failure in between leaves the row to try all again.
     private async Task ToOwnerAsync(SatoraStableSwap swap, SatoraStableAttention attention, string reason, Problems problem, DateTimeOffset? deadline,
-        string note, DateTimeOffset now)
+        string note, DateTimeOffset now, string? sweepToken = null)
     {
         if (swap.PaymentRecorded && !swap.Credited)
             await credit.UnaccountAsync(swap);
         await credit.DeactivatePromptAsync(swap.InvoiceId, SatoraStableCredit.MethodOf(swap), swap.SwapId);
-        if (!await swaps.SetNeedsAttentionAsync(swap.SwapId, swap.ClaimTxId, attention, now))
+        if (!await swaps.SetNeedsAttentionAsync(swap.SwapId, swap.ClaimTxId, attention, now, sweepToken))
         {
             logger.LogWarning("Satora stablecoin swap {SwapId} of store {StoreId} changed since it was read; it is decided again on the next tick",
                 swap.SwapId, swap.StoreId);
@@ -598,6 +616,7 @@ public class SatoraStableWorker(
         }
         swap.NeedsAttentionAt = now;
         swap.AttentionReason = attention;
+        swap.SweepToken = sweepToken;
         logger.LogWarning("Satora stablecoin swap {SwapId} of store {StoreId} needs the store ({Attention}: {Reason})", swap.SwapId, swap.StoreId, attention, reason);
         // Only once the swap is saved as needing the store, so a tick that fails before cannot note it twice.
         await credit.NoteAsync(swap, note, InvoiceEventData.EventSeverity.Warning);
@@ -615,6 +634,147 @@ public class SatoraStableWorker(
             await ReleaseAsync(swap, serverStopped: true, now, cancellationToken);
     }
 
+    // The owner's destination gets the deposit address's whole balance of the token the owner chose,
+    // paid for with gas the owner sends to the address. The destination can change until the address
+    // holds any gas, enough for the transfer or not, as the first attempt then fixes it; from then on the
+    // SDK's record of the transfer decides whether a call sends one or verifies the last. The address is
+    // read every SweepCheckInterval.
+    private async Task SweepTickAsync(SatoraStableSwap swap, CancellationToken cancellationToken)
+    {
+        var now = UtcNow;
+        if (_nextSweepCheck.TryGetValue(swap.SwapId, out var next) && now < next)
+            return;
+        _nextSweepCheck[swap.SwapId] = now + SweepCheckInterval;
+        using var hold = await swaps.HoldForSweepAsync(swap.SwapId, cancellationToken);
+        // The owner may have dismissed the swap, or changed where its tokens go, since this tick read it.
+        if (await swaps.FindAsync(swap.StoreId, swap.SwapId) is not
+            { CompletedAt: null, AttentionReason: SatoraStableAttention.Sweep, SweepDestination: { } destination } current)
+        {
+            await ForgetAsync(swap);
+            return;
+        }
+        swap = current;
+        var token = swap.SweepToken;
+        var funds = await wallets.GetFundsAsync(swap, token, cancellationToken).WaitAsync(DepositReadTimeout, cancellationToken);
+        var worth = SatoraStableRefunds.Worth(swap, token, funds.TokenUnits);
+        if (!swap.SweepAttempted)
+        {
+            // The page shows the owner what the address holds of the token chosen.
+            if (!worth)
+                return;
+            if (funds.NativeWei.IsZero)
+            {
+                await GasNeededAsync(swap);
+                return;
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!await swaps.TryStartSweepAsync(swap.SwapId, destination, token))
+                return;
+            swap.SweepAttempted = true;
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        EvmReceipt receipt;
+        try
+        {
+            receipt = await wallets.SweepAsync(swap, destination, token, cancellationToken);
+        }
+        catch (SdkException e) when (e.Kind == SdkErrorKind.InsufficientGas && !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogDebug(e, "The deposit address of Satora stablecoin swap {SwapId} of store {StoreId} holds too little gas to send its tokens back",
+                swap.SwapId, swap.StoreId);
+            await GasNeededAsync(swap);
+            return;
+        }
+        catch (SdkException e) when (e.Kind == SdkErrorKind.UnresolvedFunding && !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogInformation(e, "Satora stablecoin swap {SwapId} of store {StoreId} is not swept while a relay funding signature can still pull its deposit",
+                swap.SwapId, swap.StoreId);
+            return;
+        }
+        // Only a transfer this wallet sent empties the address once no relay signature can pull from
+        // it: the SDK refuses a sweep with nothing to move after its transfer's hash went unrecorded.
+        catch (SdkException e) when (e.Kind == SdkErrorKind.InvalidSwap && !worth && !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning(e, "The deposit address of Satora stablecoin swap {SwapId} of store {StoreId} holds nothing more to send to {Destination}, and its sweep was not recorded",
+                swap.SwapId, swap.StoreId, destination);
+            if (await swaps.SetClosedAsync(swap.SwapId, SatoraStableRefunds.SweepUnrecordedReason, now))
+                await credit.NoteAsync(swap,
+                    $"The deposit address {swap.DepositAddress} of Satora stablecoin swap {swap.SwapId} has nothing left to refund, so the swap is closed. A refund to {destination} started, but its transaction was not recorded. Check the history of {destination} to confirm the tokens arrived.",
+                    InvoiceEventData.EventSeverity.Warning);
+            await ForgetAsync(swap);
+            return;
+        }
+        catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+        {
+            var failures = _sweepFailures.AddOrUpdate(swap.SwapId, 1, (_, count) => count + 1);
+            logger.LogWarning(e, "Sending back the tokens at the deposit address of Satora stablecoin swap {SwapId} of store {StoreId} failed ({Failures} so far)",
+                swap.SwapId, swap.StoreId, failures);
+            if (failures >= FailuresBeforeAlert)
+                await AlertOnce(swap.StoreId, swap, Problems.SweepFailing, null);
+            return;
+        }
+        _sweepFailures.TryRemove(swap.SwapId, out _);
+        // A sweep repeated after it settled returns the same receipt. Noted before it is recorded, so a
+        // failure in between notes it twice rather than never.
+        if (receipt.TxHash != swap.SweepTxHash)
+        {
+            logger.LogInformation("Sent the tokens at the deposit address of Satora stablecoin swap {SwapId} of store {StoreId} to {Destination} in {TxHash}",
+                swap.SwapId, swap.StoreId, destination, receipt.TxHash);
+            await credit.NoteAsync(swap,
+                $"The tokens at the deposit address {swap.DepositAddress} of Satora stablecoin swap {swap.SwapId} were sent to {destination} in {receipt.TxHash}.",
+                InvoiceEventData.EventSeverity.Success);
+            await swaps.SetSweepTxHashAsync(swap.SwapId, receipt.TxHash);
+        }
+        // The sweep sent the whole balance, so what the address holds now arrived since, and the next
+        // check sends it to the same destination.
+        var left = await wallets.GetFundsAsync(swap, token, cancellationToken).WaitAsync(DepositReadTimeout, cancellationToken);
+        if (SatoraStableRefunds.Worth(swap, token, left.TokenUnits))
+            return;
+        if (token is not null)
+        {
+            var own = await wallets.GetFundsAsync(swap, null, cancellationToken).WaitAsync(DepositReadTimeout, cancellationToken);
+            if (SatoraStableRefunds.Worth(swap, null, own.TokenUnits))
+            {
+                await OwnTokenLeftAsync(swap, token, own.TokenUnits);
+                return;
+            }
+        }
+        await swaps.SetCompletedAsync(swap.SwapId, UtcNow);
+        await ForgetAsync(swap);
+    }
+
+    // As an overpayment's excess beside a token sent by mistake. Where the other token went need not be
+    // where this one goes, so the owner enters a destination again.
+    private async Task OwnTokenLeftAsync(SatoraStableSwap swap, string sweptToken, BigInteger units)
+    {
+        if (await swaps.ResetSweepToOwnTokenAsync(swap.SwapId, sweptToken))
+        {
+            var held = SatoraStableRefunds.Amount(swap, null, units);
+            logger.LogWarning("The deposit address of Satora stablecoin swap {SwapId} of store {StoreId} still holds {Held} after the token {Token} went back; it stays listed to send that back",
+                swap.SwapId, swap.StoreId, held, sweptToken);
+            await credit.NoteAsync(swap,
+                $"The deposit address {swap.DepositAddress} of Satora stablecoin swap {swap.SwapId} still holds {held}. Enter a refund address for it on Satora's Stablecoin refunds page.",
+                InvoiceEventData.EventSeverity.Warning);
+        }
+        await ForgetAsync(swap);
+    }
+
+    private async Task GasNeededAsync(SatoraStableSwap swap)
+    {
+        if (!await _alerts.TryStartAsync(swap.StoreId, swap.SwapId, Problems.GasNeeded))
+            return;
+        logger.LogInformation("Satora stablecoin swap {SwapId} of store {StoreId} waits for gas at its deposit address {DepositAddress} to send its tokens back",
+            swap.SwapId, swap.StoreId, swap.DepositAddress);
+        await SendAsync(new SatoraStableNotification
+        {
+            StoreId = swap.StoreId,
+            SwapId = swap.SwapId,
+            InvoiceId = swap.InvoiceId,
+            Problem = Problems.GasNeeded,
+            Amount = SatoraStableRefunds.GasToSend(swap.ChainId)
+        });
+    }
+
     private Task AlertIfNearCutoffAsync(SatoraStableSwap swap, SatoraSwapStatus status) =>
         SatoraStableActions.NearCutoff(swap, status, UtcNow)
             ? AlertOnce(swap.StoreId, swap, Problems.NearClaimCutoff, swap.ClaimCutoff)
@@ -628,7 +788,9 @@ public class SatoraStableWorker(
         _lateClaimFailureLogged.TryRemove(swapId, out _);
         _relayUnresolved.TryRemove(swapId, out _);
         _nextLateRead.TryRemove(swapId, out _);
+        _nextSweepCheck.TryRemove(swapId, out _);
         _nextFundingLookup.TryRemove(swapId, out _);
+        _sweepFailures.TryRemove(swapId, out _);
         await _alerts.ForgetSwapAsync(swap.StoreId, swapId);
     }
 
