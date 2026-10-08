@@ -335,6 +335,8 @@ claim, and links a payment taken off the invoice to the refunds page.
 Turning USDC on needs a store payment tolerance of at least 1%. Off mainnet,
 `BTCPAY_SATORA_EVMRPC_ARBITRUM` must name the Arbitrum node. To send tokens
 back, the store first sends the deposit address a little ETH for gas.
+[Before taking stablecoin payments](#before-taking-stablecoin-payments) has the
+full checklist.
 
 Turn on **USDC on Arbitrum (Satora)** (`BTC-SATORA-USDC-ARBITRUM`) on the
 Satora page. It is offered while the wallet is enabled. USDC on Polygon is not
@@ -433,7 +435,9 @@ VHTLC in time, the deposit stays locked in the swap's HTLC, which the Satora
 pages call the swap contract. From the HTLC's refund locktime, 24 hours after
 the swap was made, it can be refunded to the deposit address in the token the
 HTLC locked. To make that refund, contact Satora support at support@satora.io
-with the swap id. A payment already on the invoice comes off it.
+with the swap id, or make it by hand as
+[the runbook](#a-stablecoin-deposit-locked-in-its-htlc) says. A payment already
+on the invoice comes off it.
 
 BTCPay also notifies the store when:
 
@@ -505,7 +509,8 @@ is lost, cannot.
 
 The page also lists a swap whose deposit is locked in its HTLC, with the time
 its refund becomes possible. To make that refund, contact Satora support at
-support@satora.io with the swap id.
+support@satora.io with the swap id, or make it by hand as
+[the runbook](#a-stablecoin-deposit-locked-in-its-htlc) says.
 
 ## Withdrawals
 
@@ -697,6 +702,142 @@ one is enabled.
   recoverable funds** on the withdrawals page tries at once.
 - **The outcome of a withdrawal ... is unknown**: as for a manual withdrawal,
   check the balance and mark it sent or failed.
+
+### Before taking stablecoin payments
+
+- Set `BTCPAY_SATORA_EVMRPC_ARBITRUM` to an Arbitrum One node of the host's own
+  or of a paid provider. The public node the SDK falls back to rate-limits, and
+  the plugin reads every open deposit address every 15 seconds until 10
+  minutes after its invoice expires. A claim of a VHTLC funded short also
+  reads the swap's lock through it.
+- Set the store's payment tolerance a point above the floor the Satora page
+  names, before turning USDC on. A stablecoin payment can arrive short by the
+  DEX's price move, up to the swap's fees. A payment short by more than its
+  invoice's tolerance is not claimed, and its deposit then has to be refunded
+  from the HTLC (see
+  [A stablecoin deposit locked in its HTLC](#a-stablecoin-deposit-locked-in-its-htlc)).
+  The floor rises with the swap's fees, so a tolerance right at it can fall
+  below it.
+- Keep a little ETH on Arbitrum One in any wallet, about 0.0001 ETH per refund:
+  each refund from the Stablecoin refunds page needs it at the deposit address.
+- Show whoever watches the store the Stablecoin refunds page and the alerts
+  below.
+- For the SDK's own events, such as a claim it accepted short of its target,
+  start BTCPay with `RUST_LOG=lendaswap_sdk=info` in its environment (in
+  Docker, the BTCPay container's): they then go to BTCPay's standard error.
+  The SDK reads its log level from there only, when BTCPay starts, and logs
+  nothing without it. The plugin's own log, which has the SDK's errors, needs
+  nothing.
+
+### Alerts about stablecoin payments
+
+An alert about one swap names it and its invoice, and links to the invoice,
+or for tokens to send back to the Stablecoin refunds page. The invoice's Events
+say more.
+
+- **The deposit for ... has arrived, but funding the swap ... failed twice**:
+  the swap server's relay refused the funding or did not answer. A refusal
+  usually means the price moved past what the swap allows, or the relay has no
+  gas. The customer does not need to do anything. Funding is retried until the
+  funding cutoff, every 15 seconds, and every 5 minutes from 10 minutes after
+  the invoice expired. BTCPay's log has the SDK's reason. If it lasts more than
+  a few minutes, contact Satora support at support@satora.io with the swap id.
+  After the cutoff the deposit is listed on the Stablecoin refunds page.
+- **The customer sent ... more than ... asked for**: the invoice is paid and
+  the excess stays at the deposit address. Once the swap completes, an excess
+  of a hundredth of a token or more is listed on the Stablecoin refunds page.
+  Refund it from there.
+- **Tokens at the deposit address of ... will not pay the invoice (...)**: the
+  brackets give the reason, such as a deposit that was short or late for the
+  funding cutoff, tokens left after the swap, or tokens the HTLC's refund
+  returned. Ask the customer for an address on Arbitrum One, enter it on the
+  Stablecoin refunds page, and send the deposit address about 0.0001 ETH.
+- **Refunding the tokens ... needs gas at that address**: send the deposit
+  address the ETH the alert names, from any wallet. The refund goes out within
+  a minute of it arriving.
+- **Refunding the tokens ... failed twice**: the refund is retried every
+  minute. BTCPay's log has the SDK's reason, most often an Arbitrum node that
+  does not answer. If the log says another transfer from the address is
+  unresolved, contact Satora support at support@satora.io with the swap id and
+  that line. To send the tokens elsewhere, for example because the SDK refused
+  before sending anything when its simulation of the transfer reverted, note
+  the destination the page shows and type `DISMISS` under the swap. Then enter
+  the swap id under **Check a deposit address**, with the token's contract if
+  it is not the swap's token. The swap is listed again with a destination to
+  enter. While a transfer from the address is unresolved, only the noted
+  destination and token go through.
+- **The customer's deposit for ... is locked in the swap contract**: it does
+  not pay the invoice. See
+  [A stablecoin deposit locked in its HTLC](#a-stablecoin-deposit-locked-in-its-htlc).
+- **Claiming ... failed twice**: BTCPay's log has the SDK's reason. Most often
+  the Arkade server or the Arbitrum node did not answer, so check that both are
+  reachable. The claim is retried until its deadline. A VHTLC short of the
+  amount due by more than the invoice's payment tolerance, or by more than the
+  swap's lock shows, is refused every time, and the log names the limit. The
+  customer's deposit then has to be refunded from the HTLC (see
+  [A stablecoin deposit locked in its HTLC](#a-stablecoin-deposit-locked-in-its-htlc)).
+- **... is funded but not yet claimed into the Satora wallet**: the same, with
+  the deadline close. After it the customer's deposit has to be refunded from
+  the HTLC (see
+  [A stablecoin deposit locked in its HTLC](#a-stablecoin-deposit-locked-in-its-htlc)).
+  A restart of BTCPay does not lose a claim in progress.
+- **... reports ... as claimed, but the Satora wallet has no receipt**: compare
+  the wallet's balance with the invoice before settling it by hand.
+- **... does not know stablecoin swap ...**: nothing was moved. After the
+  swap's VHTLC locktime anything at its deposit address is listed on the
+  Stablecoin refunds page.
+- **The status of the store's Satora stablecoin payments could not be read for
+  half an hour**: the swap server does not answer, and nothing is funded,
+  recorded or claimed meanwhile.
+- **... reached an unexpected status, ...**: nothing was moved. Contact Satora
+  support at support@satora.io with the swap id.
+
+### A stablecoin deposit locked in its HTLC
+
+An operator makes this refund by hand. The swap's HTLC on Arbitrum holds the
+BTC-pegged token the funding bought with the deposit, tBTC
+(`0x6c84a8f1c29108F47a79964b5Fe888D4f4D0dE40`), not the USDC the customer sent.
+From the swap's EVM refund locktime, which the alert and the refunds page give
+(24 hours after the swap was made), anyone can refund it through the swap's
+coordinator, which pays the deposit address whoever sends the call:
+
+1. Read the swap from the swap server (`GET /swap/<swap id>`):
+   `evm_coordinator_address`, `hash_lock`, `server_evm_address` and
+   `evm_refund_locktime`. The tBTC amount the HTLC locked is in the HTLC's
+   event in the funding transaction (`cast receipt <funding transaction>`):
+   the swap's `FundTxHash` in `SatoraStableSwaps`, or the server's
+   `evm_fund_txid`. When neither has it, as for a funding that landed after
+   the server stopped following the swap, it is the transaction that took the
+   deposit from the deposit address, which an Arbitrum One explorer lists.
+2. Send the refund from any Arbitrum One account holding a little ETH:
+
+   ```bash
+   cast send <evm_coordinator_address> \
+     'refundTo(bytes32,uint256,address,address,uint256)' \
+     <hash_lock> <locked amount> 0x6c84a8f1c29108F47a79964b5Fe888D4f4D0dE40 \
+     <server_evm_address> <evm_refund_locktime> \
+     --rpc-url <Arbitrum One node> --private-key <that account's key>
+   ```
+
+   A call with a wrong value reverts and moves nothing. Once it is mined the
+   deposit address holds the tBTC, and the refunds page still lists the swap
+   as locked in its HTLC, with nothing to send back, until step 3.
+3. Turn the swap into a sweep of the tBTC:
+
+   ```sql
+   UPDATE "BTCPayServer.Plugins.Satora"."SatoraStableSwaps"
+   SET "AttentionReason" = 'Sweep',
+       "SweepToken" = '0x6c84a8f1c29108F47a79964b5Fe888D4f4D0dE40',
+       "HtlcRefundTxHash" = '<refund transaction>'
+   WHERE "SwapId" = '<swap id>' AND "AttentionReason" = 'HtlcRefund'
+     AND "CompletedAt" IS NULL;
+   ```
+
+4. On the Stablecoin refunds page, enter the customer's address, or the
+   store's own to keep the tBTC and pay the customer back another way, type
+   `REFUND`, and send the deposit address its gas.
+
+The customer gets tBTC rather than USDC; say so before sending it to them.
 
 ## Support
 
