@@ -164,6 +164,21 @@ public class SatoraStableCreditTests
         Assert.Empty(renewer.Renewed);
     }
 
+    // The customer looked at the stablecoin and paid another way, so the swap's address need not be read any more.
+    [Fact]
+    public async Task OnlyAnInvoiceSettledWithoutTheSwapsPaymentWasPaidAnotherWay()
+    {
+        var (handler, invoice, swap) = await Prompted();
+        var credit = new InvoiceCredit(invoice);
+
+        Assert.False(await credit.SettledOtherwiseAsync(swap));
+        invoice.Status = InvoiceStatus.Settled;
+        Assert.True(await credit.SettledOtherwiseAsync(swap));
+        AddPayment(invoice, SatoraStableCredit.ToPaymentData(swap, handler, PaymentStatus.Settled, Now).GetBlob());
+        Assert.False(await credit.SettledOtherwiseAsync(swap));
+        Assert.False(await new InvoiceCredit(null).SettledOtherwiseAsync(swap));
+    }
+
     private static readonly SatoraSwapPrompt StablePrompt = SatoraPromptRenewer.SwapPrompts.Single(p => p.Id == Usdc.Id);
 
     // Created waiting for the customer's pick, then activated, as BTCPay does both.
@@ -205,6 +220,11 @@ public class SatoraStableCreditTests
             Deactivated.Add((invoiceId, method, swapId));
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class InvoiceCredit(InvoiceEntity? invoice) : SatoraStableCredit(null!, null!, null!, null!, NullLogger<SatoraStableCredit>.Instance)
+    {
+        protected override Task<InvoiceEntity?> ReadInvoiceAsync(string invoiceId) => Task.FromResult(invoice);
     }
 
     private sealed class TestRenewer(SatoraStableCredit credit, Func<bool> renew)

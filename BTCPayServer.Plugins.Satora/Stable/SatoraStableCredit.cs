@@ -45,6 +45,9 @@ public class SatoraStableCredit(
     // What the claimed VHTLC held beyond the amount due, which stays in the wallet.
     public static long SurplusSats(SatoraStableSwap swap) => Math.Max(0, (swap.VhtlcSats ?? 0) - swap.ReceiveSats);
 
+    // What the claimed VHTLC fell short of the amount due by.
+    public static long ShortfallSats(SatoraStableSwap swap) => swap.VhtlcSats is { } claimed ? Math.Max(0, swap.ReceiveSats - claimed) : 0;
+
     // Built from the swap rather than with PaymentDataExtensions.Set, which copies the invoice's current
     // prompt: after a renewal that is another swap, with another deposit address.
     public static PaymentData ToPaymentData(SatoraStableSwap swap, IPaymentMethodHandler handler, PaymentStatus status, DateTimeOffset at)
@@ -172,6 +175,15 @@ public class SatoraStableCredit(
     }
 
     protected virtual async Task<InvoiceEntity?> ReadInvoiceAsync(string invoiceId) => await invoiceRepository.GetInvoice(invoiceId);
+
+    // The tolerance BTCPay settles the swap's invoice against, which the payment handler checked against
+    // the swap's fees before it made the swap. Null without the invoice.
+    public virtual async Task<decimal?> PaymentToleranceAsync(SatoraStableSwap swap) =>
+        await ReadInvoiceAsync(swap.InvoiceId) is { } invoice ? (decimal)invoice.PaymentTolerance : null;
+
+    // The customer paid the swap's invoice some other way, so its deposit address is unlikely to get anything.
+    public virtual async Task<bool> SettledOtherwiseAsync(SatoraStableSwap swap) =>
+        await ReadInvoiceAsync(swap.InvoiceId) is { Status: InvoiceStatus.Settled } invoice && Find(invoice, swap) is null;
 
     // As SatoraChainCredit.NoteAsync: a deposit that has to go back never reaches the invoice, so its
     // Events are where it stays on record. A note that cannot be written is only logged.

@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Npgsql;
+using Satora.Sdk;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Satora.Tests;
@@ -325,6 +326,43 @@ public class SatoraStableIntegrationTests(SatoraWalletIntegrationTests.Database 
         Assert.True(await wallets.SetStablecoinsAsync("stable-choice", []));
         Assert.Empty(await wallets.GetStablecoinsAsync("stable-choice"));
     }
+
+    // Each claim first gives the store's client its limit and the chain's node as its EVM reader, so the
+    // SDK can claim a VHTLC short by a conversion loss, and goes ahead without the node or its setting.
+    // No client knows this swap, so a claim gets no further than the SDK's swap store.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task AClaimGivesTheClientItsShortfallLimitAndTheChainsNodeFirst()
+    {
+        var (registry, wallets) = db.Wallets();
+        var (_, phrase) = await wallets.GenerateAsync("stable-claim", null);
+        Assert.True(await wallets.ConfirmBackupAsync("stable-claim", phrase));
+        using var node = new SatoraStableFakes.EvmNode(42161);
+        var stable = new SatoraStableWallets(new SatoraLightningWallets(registry), registry, EvmRpcAt(node.Url), SatoraStablePaymentTests.Btc);
+        var swap = Swap("stable-claim", "claim");
+
+        var unknown = await Assert.ThrowsAsync<SdkException>(() => stable.ClaimAsync(swap, "tark1own", 150, Ct));
+        Assert.Equal((SdkErrorKind.Storage, "swap key index not found"), (unknown.Kind, unknown.Message));
+        Assert.Contains("eth_chainId", node.Methods);
+
+        var asked = node.Methods.Count;
+        var refused = await Assert.ThrowsAsync<SdkException>(() => stable.ClaimAsync(swap, "tark1own", 10_001, Ct));
+        Assert.Contains("10001 basis points", refused.Message);
+        Assert.Equal(asked, node.Methods.Count);
+
+        var unreachable = new SatoraStableWallets(new SatoraLightningWallets(registry), registry, EvmRpc, SatoraStablePaymentTests.Btc);
+        var both = await Assert.ThrowsAsync<AggregateException>(() => unreachable.ClaimAsync(swap, "tark1own", 150, Ct));
+        Assert.Equal([SdkErrorKind.Storage, SdkErrorKind.Transport], both.InnerExceptions.Select(e => Assert.IsType<SdkException>(e).Kind));
+
+        var unset = new SatoraStableWallets(new SatoraLightningWallets(registry), registry, new ConfigurationBuilder().Build(), SatoraStablePaymentTests.Btc);
+        var noNode = await Assert.ThrowsAsync<AggregateException>(() => unset.ClaimAsync(swap, "tark1own", 150, Ct));
+        Assert.Equal(SdkErrorKind.Storage, Assert.IsType<SdkException>(noNode.InnerExceptions[0]).Kind);
+        Assert.Contains(SatoraNetworks.EvmRpcArbitrumKey, Assert.IsType<InvalidOperationException>(noNode.InnerExceptions[1]).Message);
+    }
+
+    private static IConfiguration EvmRpcAt(string url) => new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        [SatoraNetworks.EvmRpcArbitrumKey] = url
+    }).Build();
 
     private static readonly IConfiguration EvmRpc = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
     {

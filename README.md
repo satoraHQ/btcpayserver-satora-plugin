@@ -2,23 +2,28 @@
 
 Satora is a [BTCPay Server](https://btcpayserver.org) plugin that gives each
 store its own Satora wallet on [Arkade](https://arkade.money). Customers pay
-into it over Lightning (BTC-LN) or on chain with **Bitcoin (Satora)**
-(`BTC-SATORA-CHAIN`), and Satora swaps turn each payment into bitcoin in the
-wallet. The wallet also pays BTCPay's Lightning payouts and refunds, and the
-store can withdraw from it to Arkade, Lightning and Bitcoin destinations. The
-store holds its own keys, with no custodian in between.
+into it over Lightning (BTC-LN), on chain with **Bitcoin (Satora)**
+(`BTC-SATORA-CHAIN`) or in USDC with **USDC on Arbitrum (Satora)**, and Satora
+swaps turn each payment into bitcoin in the wallet. The wallet also pays
+BTCPay's Lightning payouts and refunds, and the store can withdraw from it to
+Arkade, Lightning and Bitcoin destinations. The store holds its own keys, and
+Lightning and on-chain payments reach the wallet with no custodian in between.
+A USDC deposit is trusted to the swap server while it converts.
 
 The Satora page, under Wallets in the store's menu, sets up the store's Satora
-wallet and shows its balance (see [Wallet](#wallet)). Lightning and on-chain
-payments land in the wallet (see [Lightning](#lightning) and
-[On-chain payments](#on-chain-payments)). The wallet pays out over Lightning,
-to Arkade and on chain, by hand or automatically above a threshold (see
-[Withdrawals](#withdrawals)).
+wallet and shows its balance (see [Wallet](#wallet)). Lightning, on-chain and
+USDC payments land in the wallet (see [Lightning](#lightning),
+[On-chain payments](#on-chain-payments) and
+[Stablecoin payments](#stablecoin-payments)). The wallet pays out over
+Lightning, to Arkade and on chain, by hand or automatically above a threshold
+(see [Withdrawals](#withdrawals)).
 
 ## Requirements
 
 BTCPay Server 2.4.2 or later, on mainnet, signet or regtest. Satora does not
-support testnet.
+support testnet. USDC payments also need an Arbitrum One node, set in
+`BTCPAY_SATORA_EVMRPC_ARBITRUM` (see
+[Stablecoin payments](#stablecoin-payments)).
 
 ## Installing
 
@@ -155,9 +160,10 @@ For payments out of the wallet it also notifies when:
 An alert about a swap that pays an invoice names the invoice and links to it.
 
 Each alert goes out once per swap, or once per outage for status alerts, and a
-BTCPay restart does not send it again. The on-chain and automatic withdrawal
-alerts below work the same way. After a restart, a claim, settle or automatic
-withdrawal that keeps failing is reported again once it has failed twice more.
+BTCPay restart does not send it again. The on-chain, stablecoin and automatic
+withdrawal alerts below work the same way. After a restart, a claim, settle or
+automatic withdrawal that keeps failing is reported again once it has failed
+twice more.
 
 ## On-chain payments
 
@@ -370,10 +376,74 @@ own tolerance is below the floor gets no swap. That includes an invoice created
 through the Greenfield API with a lower tolerance, or before the store's was
 raised.
 
+Once the deposit address holds the whole deposit, the wallet signs a Permit2
+transfer with the address's key. The swap server's relay funds the swap from it
+and pays the gas, so the customer pays only for their own transfer. The store
+trusts the swap server with the deposit while it converts. The wallet signs the
+conversion calls the relay returns, and the swap's contract locks whatever
+those calls leave of the token the server names, which is tBTC from an honest
+server.
+
+The deposit address is read every 15 seconds until 10 minutes after the invoice
+expires, then every 5 minutes until the funding cutoff. A deposit sent in parts
+is funded once it is whole. A deposit that arrives after the invoice expired,
+but before the funding cutoff, is funded and credited as paid late. A relay
+request whose outcome is unknown after a timeout or a restart is never sent
+again. It is resolved with the SDK, and checked every 15 seconds while the SDK
+reports it unresolved. A funding that landed while BTCPay had no answer for it,
+for example after a restart mid-request, is looked up every minute until the
+SDK proves its transaction, which is then recorded. A swap whose invoice was
+settled another way, with nothing at its address an hour after the invoice
+expired, is no longer read.
+
+The invoice turns processing once the swap server sees the funding. It settles
+once the wallet claims the VHTLC, with what the VHTLC held up to the amount
+due. If the DEX swap delivered more than quoted, the swap server puts the
+surplus in the VHTLC too. The surplus stays in the wallet, the invoice's Events
+note it, and the invoice does not show as overpaid.
+
+If it delivered less, the swap server funds the VHTLC short by the difference.
+The wallet claims it only while the shortfall is within the invoice's payment
+tolerance and no larger than the swap's lock on Arbitrum shows, read through
+the Arbitrum node. The invoice then settles with what the VHTLC held, and its
+Events note the shortfall. The tolerance is the invoice's own, so a change to
+the store's applies only to invoices created after it. A larger shortfall is
+refused. BTCPay notifies the store once the claim has failed twice, the claim
+is retried until its deadline, and the deposit then stays in the swap's HTLC
+for its refund, as below. The lock check relies on the lock the swap server
+said to expect, so against a dishonest swap server only the tolerance limits
+the shortfall.
+
+Tokens a swap does not use stay at the deposit address, which only the Satora
+wallet controls. Nothing leaves a deposit address while a relay signature can
+still pull from it. BTCPay notifies the store about:
+
+- tokens sent beyond the deposit, which the invoice's Events also note
+- a deposit not funded by the funding cutoff
+- a deposit sent after the swap expired.
+
+If the swap server does not complete a funding, or the wallet cannot claim its
+VHTLC in time, the deposit stays locked in the swap's HTLC, which the plugin's
+alerts call the swap contract. From the HTLC's refund locktime, 24 hours after
+the swap was made, it can be refunded to the deposit address in the token the
+HTLC locked. To make that refund, contact Satora support at support@satora.io
+with the swap id. A payment already on the invoice comes off it.
+
+BTCPay also notifies the store when:
+
+- funding fails twice
+- a claim fails twice
+- a funded swap is still unclaimed 10 minutes before its claim deadline
+- the swap server reports a claim the wallet has no receipt for
+- the swap server does not know a swap
+- statuses could not be read for half an hour
+- a swap reaches an unexpected status.
+
 Set `BTCPAY_SATORA_EVMRPC_ARBITRUM` (or `satora_evmrpc_arbitrum=` in
 `settings.config`) to an Arbitrum node, on mainnet too. Without it the SDK uses
 the chain's public nodes, which rate-limit. Off mainnet the chain is a test
-fork, so until the setting is there the method gets no prompt.
+fork, so until the setting is there the method gets no prompt and open swaps
+are not read.
 
 ## Withdrawals
 

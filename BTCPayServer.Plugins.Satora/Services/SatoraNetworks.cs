@@ -10,10 +10,11 @@ public static class SatoraNetworks
     public const string BaseUrlKey = "SATORA_BASEURL";
     public const string ArkadeServerUrlKey = "SATORA_ARKADESERVERURL";
     public const string EsploraUrlKey = "SATORA_ESPLORAURL";
-    // Each EVM chain's node for the stablecoin swaps' deposit, relay and sweep reads, on mainnet too:
-    // a node can delay a funding but not move the deposit, which takes the depositor's signature, and
-    // the public nodes the SDK falls back to rate-limit. Off mainnet the chain is a test fork, so the
-    // stablecoin methods need one.
+    // Each EVM chain's node for the stablecoin swaps' deposit, relay, claim and sweep reads, on mainnet
+    // too: a node can delay a funding but not move the deposit, which takes the depositor's signature,
+    // a claim takes its word for a conversion shortfall only within the invoice's payment tolerance,
+    // and the public nodes the SDK falls back to rate-limit. Off mainnet the chain is a test fork, so
+    // the stablecoin methods need one.
     public const string EvmRpcArbitrumKey = "SATORA_EVMRPC_ARBITRUM";
 
     public static SatoraBitcoinNetwork FromChain(ChainName chain)

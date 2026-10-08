@@ -73,8 +73,11 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddSingleton<SatoraStableSwaps>()
                 .AddSingleton<SatoraStableQuotes>()
                 .AddSingleton<SatoraStableCredit>()
+                .AddSingleton(s => ActivatorUtilities.CreateInstance<SatoraStableWallets>(s, BitcoinNetwork(s)))
                 .AddSingleton<SatoraStoreStableConfig>()
                 .AddUIExtension("checkout-end", "SatoraStable/SatoraStableMethodCheckout")
+                .AddHostedService<SatoraStableWorker>()
+                .AddSingleton<INotificationHandler, SatoraStableNotification.Handler>()
                 .AddSingleton<SatoraPluginService>();
         // One method per coin, as BTCPay registers one per network.
         foreach (var coin in SatoraStablePaymentMethod.All)

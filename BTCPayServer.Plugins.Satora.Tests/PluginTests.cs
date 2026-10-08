@@ -125,6 +125,19 @@ public class PluginTests
             Assert.Contains(services, d => d.ServiceType == dependency);
     }
 
+    [Fact]
+    public void RegistersTheStablecoinWorkerWithItsDependencies()
+    {
+        var services = new ServiceCollection();
+        new Plugin().Execute(services);
+
+        Assert.Contains(services, d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SatoraStableWorker));
+        foreach (var dependency in new[] { typeof(SatoraStableWorker), typeof(SatoraStableWallets) }
+                     .SelectMany(t => t.GetConstructors().Single().GetParameters().Select(p => p.ParameterType))
+                     .Where(t => t.Assembly == typeof(Plugin).Assembly))
+            Assert.Contains(services, d => d.ServiceType == dependency);
+    }
+
     // The partial resolves to a view compiled into the plugin.
     private static void AssertCompiledPartial(ServiceCollection services, string location, string partial)
     {

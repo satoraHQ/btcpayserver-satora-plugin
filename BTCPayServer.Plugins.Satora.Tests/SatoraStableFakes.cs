@@ -72,4 +72,53 @@ public static class SatoraStableFakes
             return Failure is null ? Task.FromResult(Quote) : Task.FromException<Quote>(Failure);
         }
     }
+
+    // A JSON-RPC node on loopback answering eth_chainId with chainId and null to anything else,
+    // recording each method asked for.
+    public sealed class EvmNode : IDisposable
+    {
+        private readonly System.Net.HttpListener _listener = new();
+
+        public System.Collections.Concurrent.ConcurrentQueue<string> Methods { get; } = new();
+
+        public string Url { get; }
+
+        public EvmNode(long chainId)
+        {
+            var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            probe.Start();
+            var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+            Url = $"http://127.0.0.1:{port}/";
+            _listener.Prefixes.Add(Url);
+            _listener.Start();
+            _ = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    System.Net.HttpListenerContext context;
+                    try
+                    {
+                        context = await _listener.GetContextAsync();
+                    }
+                    catch (Exception) when (!_listener.IsListening)
+                    {
+                        return;
+                    }
+                    using var reader = new StreamReader(context.Request.InputStream);
+                    using var request = System.Text.Json.JsonDocument.Parse(await reader.ReadToEndAsync());
+                    var method = request.RootElement.GetProperty("method").GetString()!;
+                    Methods.Enqueue(method);
+                    var result = method == "eth_chainId" ? $"\"0x{chainId:x}\"" : "null";
+                    var body = System.Text.Encoding.UTF8.GetBytes(
+                        $"{{\"jsonrpc\":\"2.0\",\"id\":{request.RootElement.GetProperty("id").GetRawText()},\"result\":{result}}}");
+                    context.Response.ContentType = "application/json";
+                    await context.Response.OutputStream.WriteAsync(body);
+                    context.Response.Close();
+                }
+            });
+        }
+
+        public void Dispose() => _listener.Close();
+    }
 }

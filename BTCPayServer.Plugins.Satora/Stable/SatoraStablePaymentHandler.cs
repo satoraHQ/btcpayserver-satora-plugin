@@ -103,8 +103,8 @@ public partial class SatoraStablePaymentHandler(
             var quote = await quotes.GetAsync(storeId, coin, waitLimit.Token);
             // BTCPay settles against the tolerance the invoice was created with, which a Greenfield
             // request can set below the store's, while the settings page checks only the store's as a
-            // coin is turned on. Below the floor an ordinary shortfall from the DEX would leave the
-            // invoice partly paid.
+            // coin is turned on. Below the floor an ordinary shortfall from the DEX would not settle the
+            // invoice.
             var floor = SatoraStableActions.ToleranceFloorPercent(quote);
             if (paymentTolerance < floor)
                 throw new PaymentMethodUnavailableException(string.Create(CultureInfo.InvariantCulture,
