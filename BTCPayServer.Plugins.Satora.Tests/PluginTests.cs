@@ -111,4 +111,17 @@ public class PluginTests
         Assert.Contains(typeof(SatoraPluginController), controllers);
         Assert.DoesNotContain(typeof(SatoraSwapController), controllers);
     }
+
+    // BTCPay renders layout-banner on every page of its main layout.
+    [Fact]
+    public void RegistersThePaymentMethodNamesOnTheLayoutBanner()
+    {
+        var services = new ServiceCollection();
+        new Plugin().Execute(services);
+
+        var extension = Assert.Single(services.Select(d => d.ImplementationInstance).OfType<IUIExtension>(), e => e.Location == "layout-banner");
+        Assert.Equal("SatoraPaymentMethodNames", extension.Partial);
+        Assert.Contains(typeof(Plugin).Assembly.GetCustomAttributes<RazorCompiledItemAttribute>(),
+            v => v.Identifier == $"/Views/Shared/{extension.Partial}.cshtml");
+    }
 }

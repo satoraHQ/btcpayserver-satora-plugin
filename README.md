@@ -162,11 +162,15 @@ failed twice more.
 
 Enabling the wallet also adds **Bitcoin (Satora)** (`BTC-SATORA-CHAIN`) to
 checkout. It is a payment method of its own and never touches the store's
-on-chain wallet. Disabling or replacing the Satora wallet removes it. Each
-payment is a Bitcoin to Arkade swap. The customer sends one transaction to the
-swap's address, the swap server funds an Arkade VHTLC after one confirmation,
-and the wallet claims it. The wallet receives exactly the amount due. The
-customer pays the swap fee on top, which checkout shows as the network cost.
+on-chain wallet. Disabling or replacing the Satora wallet removes it. The
+create invoice form, the checkout settings, the invoice list and an invoice's
+payments show it by name instead of by id. They do the same for BTCPay's own
+payment methods, such as Lightning for `BTC-LN`, on every store, including
+stores that do not use the Satora wallet. Each payment is a Bitcoin to Arkade
+swap. The customer sends one transaction to the swap's address, the swap server
+funds an Arkade VHTLC after one confirmation, and the wallet claims it. The
+wallet receives exactly the amount due. The customer pays the swap fee on top,
+which checkout shows as the network cost.
 
 - Turn on lazy payment methods in the store's checkout settings ("Only enable
   the payment method after user explicitly chooses it"). Without it every

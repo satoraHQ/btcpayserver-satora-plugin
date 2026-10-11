@@ -23,6 +23,7 @@ public class Plugin : BaseBTCPayServerPlugin
     {
         // The old stablecoin checkout extensions and SatoraSwapWatcher are not registered; see SatoraSwapController.
         services.AddUIExtension("store-wallets-nav", "SatoraPluginHeaderNav")
+                .AddUIExtension("layout-banner", "SatoraPaymentMethodNames")
                 .AddSingleton<SatoraPluginDbContextFactory>()
                 .AddHostedService<PluginMigrationRunner>()
                 .AddSingleton<SatoraSeedProtector>()

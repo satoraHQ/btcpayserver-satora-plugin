@@ -1,0 +1,34 @@
+@using BTCPayServer.Abstractions.Contracts
+@using BTCPayServer.Abstractions.Services
+@using BTCPayServer.Plugins.Satora.Services
+@using BTCPayServer.Services
+@using BTCPayServer.Services.Invoices
+@inject IScopeProvider ScopeProvider
+@inject PaymentMethodHandlerDictionary Handlers
+@inject PrettyNameProvider PrettyNames
+@inject Safe Safe
+@{
+    var names = SatoraPaymentMethodNames.For(ScopeProvider.GetCurrentStoreId(), Handlers.Select(h => h.PaymentMethodId), PrettyNames);
+}
+@if (names.Count > 0)
+{
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const names = new Map(@Safe.Json(names.Select(n => new[] { n.Key, n.Value })));
+            for (const element of document.querySelectorAll(@Safe.Json(SatoraPaymentMethodNames.Labels))) {
+                const id = element.textContent.trim();
+                const name = names.get(id);
+                if (name === undefined)
+                    continue;
+                const texts = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+                while (texts.nextNode()) {
+                    const text = texts.currentNode;
+                    if (text.data.trim() === id && !text.parentElement.closest(@Safe.Json(SatoraPaymentMethodNames.FormText))) {
+                        text.data = text.data.replace(id, () => name);
+                        break;
+                    }
+                }
+            }
+        });
+    </script>
+}
