@@ -52,13 +52,25 @@ public class SatoraOutgoingSwaps(SatoraPluginDbContextFactory dbContextFactory)
         return await Payments(ctx, storeId).Where(s => s.CompletedAt == null).ToListAsync(cancellationToken);
     }
 
-    // False when the swap was closed since it was read: nothing may fund it then.
-    public virtual async Task<bool> SetFundingAttemptedAsync(string swapId)
+    // False when the swap was closed since it was read: nothing may fund it then. again is for the
+    // worker, which only funds a swap again: false too once its first attempt was undone.
+    public virtual async Task<bool> SetFundingAttemptedAsync(string swapId, bool again = false)
     {
         await using var ctx = dbContextFactory.CreateContext();
         return await ctx.SatoraLightningSwaps
-            .Where(s => s.SwapId == swapId && s.Direction == Outgoing && s.CompletedAt == null)
+            .Where(s => s.SwapId == swapId && s.Direction == Outgoing && s.CompletedAt == null && (!again || s.FundingAttempted))
             .ExecuteUpdateAsync(u => u.SetProperty(s => s.FundingAttempted, true)) == 1;
+    }
+
+    // Undoes a first funding attempt the SDK refused before it recorded or sent anything, so nothing
+    // paid the VHTLC: the swap is unattempted again, as if the payment had been refused before it.
+    // False when the swap was funded or closed since.
+    public virtual async Task<bool> ClearFundingAttemptedAsync(string swapId)
+    {
+        await using var ctx = dbContextFactory.CreateContext();
+        return await ctx.SatoraLightningSwaps
+            .Where(s => s.SwapId == swapId && s.Direction == Outgoing && s.CompletedAt == null && s.FundingTxId == null)
+            .ExecuteUpdateAsync(u => u.SetProperty(s => s.FundingAttempted, false)) == 1;
     }
 
     public virtual Task SetFundedAsync(string swapId, string fundingTxId) =>

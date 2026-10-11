@@ -49,7 +49,9 @@ public class SatoraLnurlWithdrawalTests
         _withdrawals = new MemoryWithdrawals(_events, _swaps);
         var wallets = new FakeWalletAccess(_wallet, _events);
         _clients = new Clients(_payee);
-        _service = new Service(wallets, _withdrawals, new SatoraLightningPayments(_swaps, wallets, NullLogger<SatoraLightningPayments>.Instance), _swaps, _clients);
+        var renewals = new RecordingRenewals();
+        _service = new Service(wallets, _withdrawals, new SatoraLightningPayments(_swaps, wallets, renewals, NullLogger<SatoraLightningPayments>.Instance), renewals,
+            _swaps, _clients);
     }
 
     [Fact]
@@ -175,8 +177,8 @@ public class SatoraLnurlWithdrawalTests
     }
 
     private sealed class Service(SatoraWalletAccess wallets, SatoraWithdrawals withdrawals,
-        SatoraLightningPayments payments, SatoraOutgoingSwaps outgoing, IHttpClientFactory clients)
-        : SatoraWithdrawalService(wallets, withdrawals, payments, outgoing, null!, null!, null!, null!, clients, NullLogger<SatoraWithdrawalService>.Instance)
+        SatoraLightningPayments payments, SatoraWalletRenewals renewals, SatoraOutgoingSwaps outgoing, IHttpClientFactory clients)
+        : SatoraWithdrawalService(wallets, withdrawals, payments, renewals, outgoing, null!, null!, null!, null!, clients, NullLogger<SatoraWithdrawalService>.Instance)
     {
         public override string? Unavailable => null;
 

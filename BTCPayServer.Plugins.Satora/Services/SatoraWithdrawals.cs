@@ -80,6 +80,33 @@ public class SatoraWithdrawals(SatoraPluginDbContextFactory dbContextFactory)
         await ctx.SaveChangesAsync();
     }
 
+    // Links a withdrawal to an open swap not marked attempted, which an earlier payment of the same
+    // invoice recorded, taking the link from that payment's withdrawal if it failed: the unique index
+    // on SwapId takes one withdrawal per swap. False, changing nothing, when the swap was attempted or
+    // closed since it was read, or a withdrawal that has not failed still points at it.
+    public virtual async Task<bool> MoveSwapAsync(string withdrawalId, string swapId)
+    {
+        await using var strategyCtx = dbContextFactory.CreateContext();
+        return await strategyCtx.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            await using var ctx = dbContextFactory.CreateContext();
+            await using var transaction = await ctx.Database.BeginTransactionAsync();
+            var now = DateTimeOffset.UtcNow;
+            await ctx.SatoraWithdrawals
+                .Where(w => w.SwapId == swapId && w.Status == SatoraWithdrawalStatus.Failed)
+                .ExecuteUpdateAsync(u => u.SetProperty(w => w.SwapId, (string?)null).SetProperty(w => w.UpdatedAt, now));
+            if (await ctx.SatoraWithdrawals
+                    .Where(w => w.Id == withdrawalId && w.Status == SatoraWithdrawalStatus.Pending && w.SwapId == null &&
+                                !ctx.SatoraWithdrawals.Any(other => other.SwapId == swapId) &&
+                                ctx.SatoraLightningSwaps.Any(s => s.SwapId == swapId && s.Direction == SatoraLightningDirection.ArkadeToLightning &&
+                                                                  !s.FundingAttempted && s.CompletedAt == null))
+                    .ExecuteUpdateAsync(u => u.SetProperty(w => w.SwapId, swapId).SetProperty(w => w.UpdatedAt, now)) != 1)
+                return false;
+            await transaction.CommitAsync();
+            return true;
+        });
+    }
+
     public virtual Task SetAmountsAsync(string id, long? amountSats, long? feeSats) =>
         Update(id, u => u
             .SetProperty(w => w.AmountSats, amountSats)

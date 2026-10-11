@@ -192,6 +192,14 @@ interrupted one only 30 minutes after it started. A Lightning withdrawal
 finishes by itself, like a Lightning payout. It is sent once the invoice is
 paid, and failed once the funds are back in the wallet.
 
+Funds in the last minutes before they expire (about 10 minutes on mainnet) are
+left out of every withdrawal and payment, because what they pay would expire
+with them. A withdrawal or payment the wallet cannot cover without them sends
+nothing, and the wallet renews them in the next Arkade batch. The withdrawals
+page then asks to try again in a minute. A Lightning payout or refund fails,
+and BTCPay retries it. The spendable balance still includes these funds.
+BTCPay's log records each renewal with its Arkade batch.
+
 A Lightning address or LNURL is never handed to the swap server. BTCPay fetches
 the invoice itself, as for its own Lightning payouts (an onion address through
 BTCPay's Tor proxy), and checks the amounts it accepts. The swap server only

@@ -285,6 +285,75 @@ public class SatoraWithdrawalIntegrationTests(SatoraWalletIntegrationTests.Datab
         Assert.Equal([payment.SwapId], (await Outgoing.ListAsync("out-cols", includePending: false, 0, 10)).Select(s => s.SwapId));
     }
 
+    // A first funding the SDK refused before it recorded anything is undone, and the worker, which only
+    // funds a swap again, then leaves it alone. Nothing undoes a funded or closed swap.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task UndoesARefusedFirstFundingAttemptOnlyWhileNothingFundedOrClosedTheSwap()
+    {
+        var refused = Swap("undo", "undo-1");
+        var funded = Swap("undo", "undo-2");
+        var closed = Swap("undo", "undo-3");
+        foreach (var swap in new[] { refused, funded, closed })
+        {
+            await Outgoing.AddAsync(swap);
+            Assert.False(await Outgoing.SetFundingAttemptedAsync(swap.SwapId, again: true));
+            Assert.True(await Outgoing.SetFundingAttemptedAsync(swap.SwapId));
+        }
+        await Outgoing.SetFundedAsync(funded.SwapId, "ark-fund");
+        Assert.True(await Withdrawals.CloseUnfundedSwapAsync(closed.SwapId, "unfunded", Now));
+
+        Assert.True(await Outgoing.ClearFundingAttemptedAsync(refused.SwapId));
+        Assert.False(await Outgoing.ClearFundingAttemptedAsync(funded.SwapId));
+        Assert.False(await Outgoing.ClearFundingAttemptedAsync(closed.SwapId));
+
+        Assert.False(await Outgoing.SetFundingAttemptedAsync(refused.SwapId, again: true));
+        Assert.True(await Outgoing.SetFundingAttemptedAsync(funded.SwapId, again: true));
+        var open = (await Outgoing.ListOpenAsync("undo", Ct)).ToDictionary(s => s.SwapId);
+        Assert.Equal(new[] { refused.SwapId, funded.SwapId }.Order(), open.Keys.Order());
+        Assert.False(open[refused.SwapId].FundingAttempted);
+        Assert.True(open[funded.SwapId] is { FundingAttempted: true, FundingTxId: "ark-fund" });
+        Assert.True((await Outgoing.FindByPaymentHashAsync("undo", "undo-3"))!.FundingAttempted);
+        // A payment of the same invoice marks it attempted afresh.
+        Assert.True(await Outgoing.SetFundingAttemptedAsync(refused.SwapId));
+    }
+
+    // A Lightning invoice withdrawal paying the invoice again takes over the swap the earlier one
+    // recorded, with the link the unique index on SwapId allows one withdrawal, but only from a failed
+    // withdrawal and only while the swap is open and not marked attempted. A refused move changes
+    // nothing, the earlier link included, and the worker's close then fails the withdrawal that took
+    // the swap over.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task MovesASwapToAWithdrawalPayingItsInvoiceAgainOnlyFromAFailedOneWhileNothingFundedOrClosedIt()
+    {
+        var swap = Swap("move", "move-1");
+        var (earlier, retry, third) = (NewKey(), NewKey(), NewKey());
+        await Withdrawals.TryAddAsync(Withdrawal("move", earlier, SatoraWithdrawalType.LightningInvoice));
+        await Withdrawals.AttachSwapAsync(earlier, swap);
+        await Withdrawals.TryAddAsync(Withdrawal("move", retry, SatoraWithdrawalType.LightningInvoice));
+        await Withdrawals.TryAddAsync(Withdrawal("move", third, SatoraWithdrawalType.LightningInvoice));
+
+        Assert.False(await Withdrawals.MoveSwapAsync(retry, swap.SwapId));
+        await Withdrawals.SetOutcomeAsync(earlier, SatoraWithdrawalStatus.Failed, null, "refused");
+        Assert.True(await Outgoing.SetFundingAttemptedAsync(swap.SwapId));
+        Assert.False(await Withdrawals.MoveSwapAsync(retry, swap.SwapId));
+        Assert.Equal((swap.SwapId, null), await LinksAsync(earlier, retry));
+
+        Assert.True(await Outgoing.ClearFundingAttemptedAsync(swap.SwapId));
+        Assert.True(await Withdrawals.MoveSwapAsync(retry, swap.SwapId));
+        Assert.Equal((null, swap.SwapId), await LinksAsync(earlier, retry));
+        Assert.Equal(retry, (await Withdrawals.FindBySwapIdAsync("move", swap.SwapId))?.Id);
+        Assert.False(await Withdrawals.MoveSwapAsync(third, swap.SwapId));
+
+        Assert.True(await Withdrawals.CloseUnattemptedSwapAsync(swap.SwapId, SatoraSwapStatus.Expired, "expired", Now));
+        Assert.True(await Withdrawals.FindAsync("move", retry) is { Status: SatoraWithdrawalStatus.Failed, Error: "expired" });
+        Assert.False(await Withdrawals.MoveSwapAsync(third, swap.SwapId));
+        Assert.Equal((swap.SwapId, null), await LinksAsync(retry, third));
+        Assert.Equal(SatoraWithdrawalStatus.Failed, (await Withdrawals.FindAsync("move", earlier))?.Status);
+
+        async Task<(string?, string?)> LinksAsync(string first, string second) =>
+            ((await Withdrawals.FindAsync("move", first))?.SwapId, (await Withdrawals.FindAsync("move", second))?.SwapId);
+    }
+
     private static string NewKey() => Guid.NewGuid().ToString("N");
 
     private static SatoraWithdrawal Withdrawal(string storeId, string id, SatoraWithdrawalType type = SatoraWithdrawalType.Arkade,

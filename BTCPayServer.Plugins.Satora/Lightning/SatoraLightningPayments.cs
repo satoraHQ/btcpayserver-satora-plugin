@@ -15,6 +15,7 @@ namespace BTCPayServer.Plugins.Satora.Lightning;
 public class SatoraLightningPayments(
     SatoraOutgoingSwaps swaps,
     SatoraWalletAccess wallets,
+    SatoraWalletRenewals renewals,
     ILogger<SatoraLightningPayments> logger)
 {
     private const int ListLimit = 100;
@@ -60,6 +61,11 @@ public class SatoraLightningPayments(
                 await FundAsync(wallet, swap);
                 return Report(swap);
             }, cancellation);
+        }
+        catch (SatoraFundsExpiringException e)
+        {
+            renewals.Start(storeId);
+            return new PayResponse(PayResult.Error, e.Message);
         }
         catch (Exception e) when (!fundingAttempted || e is SatoraSwapClosedException)
         {
@@ -110,9 +116,12 @@ public class SatoraLightningPayments(
             });
     }
 
-    // Inside a SpendAsync action. Records the attempt, then funds. A failed attempt is left to the
-    // worker, which calls FundArkadeSwapAsync again: the SDK resolves it from its journal. A swap the
-    // worker closed since it was read is refused before anything is attempted.
+    // Inside a SpendAsync action, for a swap no attempt funded before. Records the attempt, then funds.
+    // A failed attempt is left to the worker, which calls FundArkadeSwapAsync again: the SDK resolves
+    // it from its journal. A swap the worker closed since it was read is refused before anything is
+    // attempted. A first attempt the SDK refused for funds about to expire journaled nothing, so it
+    // is undone and SatoraFundsExpiringException thrown: the payment can be retried once they are
+    // renewed.
     public async Task FundAsync(ISatoraWallet wallet, SatoraLightningSwap swap)
     {
         if (!await swaps.SetFundingAttemptedAsync(swap.SwapId))
@@ -124,6 +133,8 @@ public class SatoraLightningPayments(
         }
         catch (Exception e)
         {
+            if (SatoraWalletRenewals.IsExpiringRefusal(e) && await UndoAttemptAsync(swap, e))
+                throw new SatoraFundsExpiringException(e);
             logger.LogWarning(e, "Funding Satora Lightning swap {SwapId} of store {StoreId} has an unknown outcome; the worker resolves it", swap.SwapId, swap.StoreId);
             return;
         }
@@ -136,6 +147,25 @@ public class SatoraLightningPayments(
         {
             logger.LogWarning(e, "Satora Lightning swap {SwapId} of store {StoreId} was funded, but its txid was not saved; the worker reads it again", swap.SwapId, swap.StoreId);
         }
+    }
+
+    // False when the undo did not apply, which leaves the attempt to the worker as any other failure.
+    private async Task<bool> UndoAttemptAsync(SatoraLightningSwap swap, Exception refusal)
+    {
+        try
+        {
+            if (!await swaps.ClearFundingAttemptedAsync(swap.SwapId))
+                return false;
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "Could not undo the refused funding attempt of Satora Lightning swap {SwapId} of store {StoreId}", swap.SwapId, swap.StoreId);
+            return false;
+        }
+        swap.FundingAttempted = false;
+        logger.LogInformation("Funding Satora Lightning swap {SwapId} of store {StoreId} was refused, as funds it needs are about to expire; nothing was paid ({Reason})",
+            swap.SwapId, swap.StoreId, refusal.Message);
+        return true;
     }
 
     // What an existing payment reports, as GetPayment would.
@@ -224,3 +254,7 @@ public class SatoraLightningPayments(
 
 public sealed class SatoraSwapClosedException(string swapId)
     : InvalidOperationException($"Satora swap {swapId} was closed before it was funded, so nothing was paid.");
+
+// A swap's first funding, refused for funds about to expire and undone: nothing was paid.
+public sealed class SatoraFundsExpiringException(Exception refusal)
+    : InvalidOperationException("Some of the Satora wallet's funds are about to expire. They are being renewed. Try again in a minute.", refusal);

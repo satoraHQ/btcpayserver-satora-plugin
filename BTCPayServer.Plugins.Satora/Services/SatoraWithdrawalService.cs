@@ -40,6 +40,7 @@ public class SatoraWithdrawalService(
     SatoraWalletAccess wallets,
     SatoraWithdrawals withdrawals,
     SatoraLightningPayments payments,
+    SatoraWalletRenewals renewals,
     SatoraOutgoingSwaps outgoing,
     SatoraWalletRegistry registry,
     BTCPayNetworkProvider networkProvider,
@@ -54,6 +55,7 @@ public class SatoraWithdrawalService(
     protected virtual TimeSpan LnurlTimeout => TimeSpan.FromSeconds(30);
     public const string UnresolvedMessage =
         "A withdrawal's outcome is unknown. Check the wallet's balance and mark it sent or failed before withdrawing again.";
+    public const string ExpiringFundsMessage = "Some of the wallet's funds are about to expire. They are being renewed. Try again in a minute.";
     public const string CloseConfirmationWord = "CLOSE";
     // arkd's dust (330 sats today): the least recoverable total ark-client settles.
     public const long DustSats = 330;
@@ -172,6 +174,10 @@ public class SatoraWithdrawalService(
         catch (Exception e) when (e is SatoraAmountRefusedException or SatoraPayeeException)
         {
             return Refuse(review, e.Message);
+        }
+        catch (Exception e) when (SatoraWalletRenewals.IsExpiringRefusal(e))
+        {
+            return Refuse(review, StartRenewal(storeId, e));
         }
         catch (Exception e)
         {
@@ -436,8 +442,9 @@ public class SatoraWithdrawalService(
         try
         {
             var (bolt11, paymentHash) = await InvoiceAsync(wallet, target, amountSats, spendable, network);
-            swap = await payments.CreateAsync(wallet, withdrawal.StoreId, new SdkLightningDestination.Invoice(bolt11), network, paymentHash,
-                created => withdrawals.AttachSwapAsync(withdrawal.Id, created));
+            swap = await UnfundedSwapAsync(withdrawal, target, paymentHash)
+                   ?? await payments.CreateAsync(wallet, withdrawal.StoreId, new SdkLightningDestination.Invoice(bolt11), network, paymentHash,
+                       created => withdrawals.AttachSwapAsync(withdrawal.Id, created));
             receive = swap.AmountMsat / 1000;
             fees = swap.FundingSats!.Value - receive;
             await SetAmountsAsync(withdrawal, receive, fees);
@@ -466,12 +473,39 @@ public class SatoraWithdrawalService(
         {
             return await FailAsync(withdrawal, e.Message, e);
         }
+        catch (SatoraFundsExpiringException e)
+        {
+            return await FailAsync(withdrawal, e.Message, e.InnerException);
+        }
         catch (Exception e)
         {
             logger.LogWarning(e, "Lightning withdrawal {WithdrawalId} of store {StoreId} is left to the worker", withdrawal.Id, withdrawal.StoreId);
         }
         return Result(SatoraWithdrawResultKind.Pending,
             "Lightning payment started. Its status below changes to sent once the invoice is paid, or to failed if the funds return to the wallet.");
+    }
+
+    // The swap server and the swaps table take one swap per invoice, so a Lightning invoice paid again
+    // funds the swap an earlier payment recorded, as BTCPay's retry of a payout does: one whose first
+    // funding the SDK refused for funds about to expire, for example. Only a swap not marked attempted,
+    // which nothing can have paid, that still awaits funding for an invoice not yet expired, is taken
+    // over, and only from a withdrawal that failed. Any other is refused. Null when the invoice has no
+    // swap yet.
+    private async Task<SatoraLightningSwap?> UnfundedSwapAsync(SatoraWithdrawal withdrawal, SatoraWithdrawTarget target, string paymentHash)
+    {
+        if (target.Type != SatoraWithdrawalType.LightningInvoice ||
+            await outgoing.FindByPaymentHashAsync(withdrawal.StoreId, paymentHash) is not { } swap)
+            return null;
+        var used = $"An earlier payment from this wallet already used this invoice (Satora swap {swap.SwapId}). Ask the payee for a new invoice if it was not paid.";
+        if (swap is not { FundingAttempted: false, Status: SatoraSwapStatus.Pending, CompletedAt: null })
+            throw new InvalidOperationException(used);
+        if (swap.ExpiresAt <= DateTimeOffset.UtcNow)
+            throw new InvalidOperationException("The invoice has expired.");
+        if (!await withdrawals.MoveSwapAsync(withdrawal.Id, swap.SwapId))
+            throw new InvalidOperationException(used);
+        logger.LogInformation("Lightning invoice withdrawal {WithdrawalId} of store {StoreId} takes over Satora swap {SwapId}, which an earlier payment of the same invoice recorded without funding it",
+            withdrawal.Id, withdrawal.StoreId, swap.SwapId);
+        return swap;
     }
 
     // The invoice a manual withdrawal's swap pays.
@@ -629,10 +663,22 @@ public class SatoraWithdrawalService(
 
     private async Task<SatoraWithdrawResult> FailAsync(SatoraWithdrawal withdrawal, string message, Exception? error)
     {
-        if (error is not null)
+        if (SatoraWalletRenewals.IsExpiringRefusal(error))
+            message = StartRenewal(withdrawal.StoreId, error!);
+        else if (error is not null)
             logger.LogWarning(error, "Withdrawal {WithdrawalId} from the Satora wallet of store {StoreId} failed; nothing was sent", withdrawal.Id, withdrawal.StoreId);
         await withdrawals.SetOutcomeAsync(withdrawal.Id, SatoraWithdrawalStatus.Failed, null, message);
         return Result(SatoraWithdrawResultKind.Failed, $"Nothing was sent: {message}");
+    }
+
+    // The SDK refused a withdrawal the wallet cannot cover without its funds about to expire: they are
+    // renewed, and the store is told to try again rather than shown the refusal.
+    private string StartRenewal(string storeId, Exception refusal)
+    {
+        logger.LogInformation("A withdrawal from the Satora wallet of store {StoreId} was refused, as funds it needs are about to expire; renewing them ({Reason})",
+            storeId, refusal.Message);
+        renewals.Start(storeId);
+        return ExpiringFundsMessage;
     }
 
     private async Task<SatoraWithdrawResult> SendFailedAsync(SatoraWithdrawal withdrawal, Exception error)

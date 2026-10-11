@@ -18,6 +18,10 @@ public interface ISatoraWallet
 
     Task<string?> SettleArkadeAsync();
 
+    // Renews the VTXOs about to expire that sends, swap fundings and exits leave out; returns the
+    // Arkade batch, or null when none was due.
+    Task<string?> RenewArkadeAsync();
+
     Task<string> SendArkadeAsync(string destination, ulong amountSats);
 
     Task<OffboardQuote> GetOffboardQuoteAsync(string address, ulong? amountSats);
@@ -66,6 +70,8 @@ public class SatoraWalletAccess(SatoraWalletRegistry registry)
         public Task<ArkadeBalance> GetBalanceAsync() => Client.GetArkadeBalanceAsync();
 
         public Task<string?> SettleArkadeAsync() => Client.SettleArkadeAsync();
+
+        public Task<string?> RenewArkadeAsync() => Client.RenewArkadeAsync();
 
         public Task<string> SendArkadeAsync(string destination, ulong amountSats) => Client.SendArkadeAsync(destination, amountSats);
 

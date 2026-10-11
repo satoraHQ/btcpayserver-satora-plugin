@@ -31,6 +31,7 @@ public class SatoraWithdrawalTests
     private readonly FakeWalletAccess _wallets;
     private readonly RecordingLogger<SatoraWithdrawalService> _log = new();
     private readonly RecordingLogger<SatoraLightningPayments> _paymentsLog = new();
+    private readonly RecordingRenewals _renewals = new();
     private readonly TestWithdrawalService _service;
 
     public SatoraWithdrawalTests()
@@ -40,7 +41,7 @@ public class SatoraWithdrawalTests
         _withdrawals = new MemoryWithdrawals(_events, _swaps);
         _wallets = new FakeWalletAccess(_wallet, _events);
         _service = new TestWithdrawalService(_events, _wallets, _withdrawals,
-            new SatoraLightningPayments(_swaps, _wallets, _paymentsLog), _swaps, _log);
+            new SatoraLightningPayments(_swaps, _wallets, _renewals, _paymentsLog), _renewals, _swaps, _log);
     }
 
     [Theory]
@@ -684,6 +685,133 @@ public class SatoraWithdrawalTests
         Assert.Empty(_service.Notified);
     }
 
+    // The SDK leaves funds about to expire out of every send, exit and swap funding, and its refusal
+    // for them comes before anything is sent: they are renewed, and the store is asked to try again.
+    [Fact]
+    public async Task AnArkadeSendRefusedForFundsAboutToExpireRenewsThemAndAsksToTryAgain()
+    {
+        _wallet.SendError = new SdkException(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.ShortOfExpiring);
+
+        var result = await Execute(Ark, "0.00001");
+
+        Assert.Equal((SatoraWithdrawResultKind.Failed, "Nothing was sent: " + SatoraWithdrawalService.ExpiringFundsMessage), (result.Kind, result.Message));
+        Assert.True(_withdrawals.Rows["key"] is { Status: SatoraWithdrawalStatus.Failed, TxId: null, Error: SatoraWithdrawalService.ExpiringFundsMessage });
+        Assert.Equal([Store], _renewals.Started);
+        Assert.Empty(_service.Notified);
+    }
+
+    [Fact]
+    public async Task AnExitRefusedForFundsAboutToExpireRenewsThemAndAsksToTryAgain()
+    {
+        _wallet.SendError = new SdkException(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.OffboardShortOfExpiring);
+
+        var result = await Execute(OnChain, null, sendAll: true, maxFeeSats: 200);
+
+        Assert.Equal((SatoraWithdrawResultKind.Failed, "Nothing was sent: " + SatoraWithdrawalService.ExpiringFundsMessage), (result.Kind, result.Message));
+        Assert.True(_withdrawals.Rows["key"] is { Status: SatoraWithdrawalStatus.Failed, TxId: null });
+        Assert.Equal([Store], _renewals.Started);
+    }
+
+    [Fact]
+    public async Task AnExitsReviewRefusedForFundsAboutToExpireRenewsThemAndAsksToTryAgain()
+    {
+        _wallet.OffboardQuoteError = new SdkException(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.OffboardShortOfExpiring);
+
+        var review = await _service.ReviewAsync(Store, new SatoraWithdrawRequest { Destination = OnChain, SendAll = true });
+
+        Assert.Equal((SatoraWithdrawalService.ExpiringFundsMessage, null), (review.Error, review.Key));
+        Assert.Equal([Store], _renewals.Started);
+    }
+
+    // The swap's attempt is undone, so the worker never funds it, and the withdrawal failed.
+    [Fact]
+    public async Task ALightningWithdrawalRefusedForFundsAboutToExpireRenewsThemAndAsksToTryAgain()
+    {
+        _wallet.FundError = new SdkException(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.ShortOfExpiring);
+
+        var result = await Execute("alice@example.com", "0.00012345", maxTotalSats: 12_400);
+
+        Assert.Equal((SatoraWithdrawResultKind.Failed, "Nothing was sent: " + SatoraWithdrawalService.ExpiringFundsMessage), (result.Kind, result.Message));
+        Assert.True(_withdrawals.Rows["key"] is { Status: SatoraWithdrawalStatus.Failed, SwapId: "swap", TxId: null });
+        Assert.True(_swaps.Rows["swap"] is { FundingAttempted: false, FundingTxId: null, CompletedAt: null });
+        Assert.Equal([Store], _renewals.Started);
+    }
+
+    // The swap server, like the swaps table, takes one swap per invoice, so the retry the refusal asks
+    // for funds the swap the first attempt recorded, and takes its link from the failed withdrawal.
+    [Fact]
+    public async Task ALightningInvoiceWithdrawalRetriedAfterARefusalForFundsAboutToExpireFundsTheSameSwap()
+    {
+        var invoice = TestBolt11.Create(12_345, Network.Main);
+        _wallet.Create = _ => FakeWallet.ArkadeToLightning("swap", bolt11: invoice);
+        _wallet.FundError = new SdkException(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.ShortOfExpiring);
+        var refused = await Execute(invoice, null, maxTotalSats: 12_400, key: "first");
+        Assert.Equal((SatoraWithdrawResultKind.Failed, "Nothing was sent: " + SatoraWithdrawalService.ExpiringFundsMessage), (refused.Kind, refused.Message));
+        _wallet.FundError = null;
+        _wallet.CreateError = SwapExists();
+        _events.All.Clear();
+
+        var result = await Execute(invoice, null, maxTotalSats: 12_400, key: "retry");
+
+        Assert.Equal(SatoraWithdrawResultKind.Pending, result.Kind);
+        Assert.Equal(["withdrawal retry (gated)", "move swap to retry (gated)", "attempted swap (gated)", "fund swap (gated)"], _events.All);
+        Assert.True(_swaps.Rows["swap"] is { FundingAttempted: true, FundingTxId: "ark-swap", CompletedAt: null });
+        Assert.True(_withdrawals.Rows["retry"] is { Status: SatoraWithdrawalStatus.Pending, SwapId: "swap", TxId: "ark-swap", AmountSats: 12_345, FeeSats: 55 });
+        Assert.True(_withdrawals.Rows["first"] is { Status: SatoraWithdrawalStatus.Failed, SwapId: null, TxId: null });
+    }
+
+    // Only a swap not marked attempted, which nothing can have paid, open and still awaiting funding,
+    // with no withdrawal but a failed one pointing at it, is taken over. Any other is refused before
+    // anything is asked of the swap server or the wallet, and keeps its link.
+    [Theory]
+    // Funded.
+    [InlineData(true, "ark-swap", SatoraSwapStatus.ClientFunded, false, SatoraWithdrawalStatus.Pending)]
+    // A funding whose outcome the worker has not resolved yet.
+    [InlineData(true, null, SatoraSwapStatus.Pending, false, SatoraWithdrawalStatus.Pending)]
+    // Given up by the swap server, or closed.
+    [InlineData(false, null, SatoraSwapStatus.Expired, false, SatoraWithdrawalStatus.Failed)]
+    [InlineData(false, null, SatoraSwapStatus.Expired, true, SatoraWithdrawalStatus.Failed)]
+    // Unfunded, but its withdrawal is still pending.
+    [InlineData(false, null, SatoraSwapStatus.Pending, false, SatoraWithdrawalStatus.Pending)]
+    public async Task ALightningInvoiceWithdrawalRetriedOnASwapThatMayHoldFundsOrHasEndedSendsNothing(bool attempted, string? fundingTxId,
+        SatoraSwapStatus status, bool closed, SatoraWithdrawalStatus earlier)
+    {
+        var invoice = TestBolt11.Create(12_345, Network.Main);
+        _wallet.CreateError = SwapExists();
+        EarlierPayment(invoice, earlier, swap =>
+        {
+            (swap.FundingAttempted, swap.FundingTxId, swap.Status) = (attempted, fundingTxId, status);
+            swap.CompletedAt = closed ? DateTimeOffset.UtcNow : null;
+        });
+        var before = MemoryOutgoingSwaps.Copy(_swaps.Rows["swap"]);
+
+        var result = await Execute(invoice, null, maxTotalSats: 12_400, key: "retry");
+
+        Assert.Equal((SatoraWithdrawResultKind.Failed,
+                "Nothing was sent: An earlier payment from this wallet already used this invoice (Satora swap swap). Ask the payee for a new invoice if it was not paid."),
+            (result.Kind, result.Message));
+        Assert.DoesNotContain(_events.All, e => e.StartsWith("create", StringComparison.Ordinal) || e.StartsWith("attempted", StringComparison.Ordinal) ||
+                                                e.StartsWith("fund", StringComparison.Ordinal));
+        Assert.Equivalent(before, _swaps.Rows["swap"]);
+        Assert.True(_withdrawals.Rows["retry"] is { Status: SatoraWithdrawalStatus.Failed, SwapId: null, TxId: null });
+        Assert.True(_withdrawals.Rows["earlier"] is { SwapId: "swap" } row && row.Status == earlier);
+    }
+
+    // As for a payout, the swap of an invoice that has expired is not funded.
+    [Fact]
+    public async Task ALightningInvoiceWithdrawalRetriedAfterTheInvoiceExpiredSendsNothing()
+    {
+        _wallet.CreateError = SwapExists();
+        EarlierPayment(SatoraLightningCreditTests.Bolt11, SatoraWithdrawalStatus.Failed);
+
+        var result = await Execute(SatoraLightningCreditTests.Bolt11, null, maxTotalSats: 12_400, key: "retry");
+
+        Assert.Equal((SatoraWithdrawResultKind.Failed, "Nothing was sent: The invoice has expired."), (result.Kind, result.Message));
+        Assert.Equal(["withdrawal retry (gated)"], _events.All);
+        Assert.True(_swaps.Rows["swap"] is { FundingAttempted: false, CompletedAt: null });
+        Assert.True(_withdrawals.Rows["earlier"] is { Status: SatoraWithdrawalStatus.Failed, SwapId: "swap" });
+    }
+
     // Sending everything takes what the wallet holds when it runs, so its total is not held to the
     // review's; its fees are. The test swap keeps 55 sats of fees.
     [Fact]
@@ -886,6 +1014,22 @@ public class SatoraWithdrawalTests
         _withdrawals.Rows[withdrawalId] = withdrawal;
     }
 
+    // What the swap server answers when asked for a second swap for an invoice.
+    private static SdkException SwapExists() => new(SdkErrorKind.Api, "a swap with this payment hash exists already");
+
+    // An earlier Lightning invoice withdrawal, as the store's first try left it: its swap "swap", open,
+    // awaiting funding and never attempted unless change says otherwise, and its withdrawal "earlier".
+    private void EarlierPayment(string invoice, SatoraWithdrawalStatus status, Action<SatoraLightningSwap>? change = null)
+    {
+        var paymentHash = BOLT11PaymentRequest.Parse(invoice, Network.Main).PaymentHash!.ToString();
+        var swap = SatoraLightningPayments.ToRow(FakeWallet.ArkadeToLightning("swap", bolt11: invoice), Store, Network.Main, paymentHash, DateTimeOffset.UtcNow);
+        change?.Invoke(swap);
+        _swaps.Rows["swap"] = swap;
+        var withdrawal = Row("earlier", status, DateTimeOffset.UtcNow);
+        (withdrawal.Type, withdrawal.Destination, withdrawal.SwapId) = (SatoraWithdrawalType.LightningInvoice, invoice, "swap");
+        _withdrawals.Rows["earlier"] = withdrawal;
+    }
+
     // The swap server's quote for paying an invoice: 0.3% and the given Lightning fee.
     private static LightningSendQuote QuoteOf(SdkLightningDestination destination, long networkFeeSats)
     {
@@ -923,8 +1067,8 @@ public class SatoraWithdrawalTests
     };
 
     private sealed class TestWithdrawalService(OutgoingEvents events, SatoraWalletAccess wallets, SatoraWithdrawals withdrawals,
-        SatoraLightningPayments payments, SatoraOutgoingSwaps outgoing, ILogger<SatoraWithdrawalService>? logger = null)
-        : SatoraWithdrawalService(wallets, withdrawals, payments, outgoing, null!, null!, null!, null!, null!, logger ?? NullLogger<SatoraWithdrawalService>.Instance)
+        SatoraLightningPayments payments, SatoraWalletRenewals renewals, SatoraOutgoingSwaps outgoing, ILogger<SatoraWithdrawalService>? logger = null)
+        : SatoraWithdrawalService(wallets, withdrawals, payments, renewals, outgoing, null!, null!, null!, null!, null!, logger ?? NullLogger<SatoraWithdrawalService>.Instance)
     {
         public List<string> Notified { get; } = [];
 

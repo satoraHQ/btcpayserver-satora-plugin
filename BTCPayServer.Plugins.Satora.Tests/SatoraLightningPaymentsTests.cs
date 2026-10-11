@@ -21,13 +21,14 @@ public class SatoraLightningPaymentsTests
     private readonly MemoryOutgoingSwaps _swaps;
     private readonly FakeWallet _wallet;
     private readonly SatoraLightningPayments _payments;
+    private readonly RecordingRenewals _renewals = new();
     private int _keyChecks;
 
     public SatoraLightningPaymentsTests()
     {
         _swaps = new MemoryOutgoingSwaps(_events);
         _wallet = new FakeWallet(_events) { Create = _ => FakeWallet.ArkadeToLightning("swap") };
-        _payments = new SatoraLightningPayments(_swaps, new FakeWalletAccess(_wallet, _events), NullLogger<SatoraLightningPayments>.Instance)
+        _payments = new SatoraLightningPayments(_swaps, new FakeWalletAccess(_wallet, _events), _renewals, NullLogger<SatoraLightningPayments>.Instance)
         {
             Clock = () => Now
         };
@@ -266,6 +267,40 @@ public class SatoraLightningPaymentsTests
         Assert.Equal(PayResult.Unknown, response.Result);
         Assert.Equal(LightningPaymentStatus.Pending, response.Details.Status);
         Assert.True(_swaps.Rows["swap"] is { FundingAttempted: true, FundingTxId: null });
+    }
+
+    // The SDK refused the first funding before it recorded anything, so nothing was paid: BTCPay hears
+    // the payment failed and retries it, and the funds are renewed meanwhile.
+    [Fact]
+    public async Task AFundingRefusedForFundsAboutToExpireFailsSoBtcpayRetriesOnceTheyAreRenewed()
+    {
+        _wallet.FundError = new SdkException(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.ShortOfExpiring);
+
+        var response = await Pay();
+
+        Assert.Equal((PayResult.Error, "Some of the Satora wallet's funds are about to expire. They are being renewed. Try again in a minute."),
+            (response.Result, response.ErrorDetail));
+        Assert.True(_swaps.Rows["swap"] is { FundingAttempted: false, FundingTxId: null, CompletedAt: null });
+        Assert.Equal([Store], _renewals.Started);
+        Assert.Equal(LightningPaymentStatus.Pending, (await _payments.GetPaymentAsync(Store, PaymentHash))!.Status);
+
+        // BTCPay's retry brings the same invoice back, which funds the same swap.
+        _wallet.FundError = null;
+        _events.All.Clear();
+        Assert.Equal(PayResult.Unknown, (await Pay()).Result);
+        Assert.Equal(["attempted swap (gated)", "fund swap (gated)"], _events.All);
+        Assert.Equal("ark-swap", _swaps.Rows["swap"].FundingTxId);
+    }
+
+    [Fact]
+    public async Task ARefusalForFundsAboutToExpireWhoseUndoFailsIsLeftToTheWorker()
+    {
+        _wallet.FundError = new SdkException(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.ShortOfExpiring);
+        _swaps.ClearFundingAttemptedError = new InvalidOperationException("connection lost");
+
+        Assert.Equal(PayResult.Unknown, (await Pay()).Result);
+        Assert.True(_swaps.Rows["swap"] is { FundingAttempted: true, FundingTxId: null });
+        Assert.Empty(_renewals.Started);
     }
 
     // The write may have committed though it threw; the worker would then fund the swap.

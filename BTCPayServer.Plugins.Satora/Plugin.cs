@@ -38,6 +38,8 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddSingleton<SatoraLightningCredit>()
                 .AddSingleton<SatoraStoreLightningConfig>()
                 .AddSingleton<SatoraWalletAccess>()
+                .AddSingleton<SatoraWalletRenewals>()
+                .AddSingleton<IHostedService>(s => s.GetRequiredService<SatoraWalletRenewals>())
                 .AddSingleton<SatoraOutgoingSwaps>()
                 .AddSingleton<SatoraLightningPayments>()
                 .AddSingleton<SatoraWithdrawals>()

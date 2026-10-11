@@ -33,6 +33,7 @@ public class SatoraOutgoingWorkerTests
     private readonly FakeWalletAccess _wallets;
     private readonly RecordingLogger _log = new();
     private readonly MemorySentAlerts _sentAlerts = new();
+    private readonly RecordingRenewals _renewals = new();
     private readonly TestWorker _worker;
 
     public SatoraOutgoingWorkerTests()
@@ -41,7 +42,7 @@ public class SatoraOutgoingWorkerTests
         _wallet = new FakeWallet(_events);
         _withdrawals = new MemoryWithdrawals(_events, _swaps);
         _wallets = new FakeWalletAccess(_wallet, _events);
-        _worker = new TestWorker(_swaps, _wallets, _withdrawals, _log, _sentAlerts);
+        _worker = new TestWorker(_swaps, _wallets, _renewals, _withdrawals, _log, _sentAlerts);
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -186,6 +187,40 @@ public class SatoraOutgoingWorkerTests
         Assert.Contains("BTCPay is not told the payment failed", SatoraLightningNotification.Body(_worker.Sent[0], _worker.Now));
         Assert.Contains("BTCPay was told it failed", SatoraLightningNotification.Body(_worker.Sent[1], _worker.Now));
         Assert.True(_swaps.Rows["swap"] is { FundingTxId: null, CompletedAt: null });
+    }
+
+    // Both refusals for funds about to expire clear once a renewal rolls them into a new batch, so the
+    // worker starts one and retries without counting the attempt as failing.
+    [Theory]
+    [InlineData(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.ShortOfExpiring)]
+    [InlineData(SdkErrorKind.Transport, SatoraWalletRenewalsTests.JournaledInputExpiring)]
+    public async Task RenewsFundsAboutToExpireAndRetriesTheFundingWithoutAlerting(SdkErrorKind kind, string refusal)
+    {
+        Open("swap", new SdkSwapStatus.Pending(), fundingAttempted: true);
+        _wallet.FundError = new SdkException(kind, refusal);
+
+        await _worker.TickAsync(Store, Ct);
+        await _worker.TickAsync(Store, Ct);
+        _wallet.FundError = null;
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.Empty(_worker.Sent);
+        Assert.Equal([Store, Store], _renewals.Started);
+        Assert.Equal("ark-swap", _swaps.Rows["swap"].FundingTxId);
+    }
+
+    // A payment undid its refused first attempt after the worker read the swap attempted. BTCPay was
+    // told the payment failed and may pay a fresh invoice instead, so the worker never funds this one.
+    [Fact]
+    public async Task NeverFundsASwapWhoseFirstAttemptAPaymentUndid()
+    {
+        Open("swap", new SdkSwapStatus.Pending(), fundingAttempted: true);
+        _swaps.AfterListOpen = () => _swaps.Rows["swap"].FundingAttempted = false;
+
+        await _worker.TickAsync(Store, Ct);
+
+        Assert.DoesNotContain(_events.All, e => e.StartsWith("fund", StringComparison.Ordinal));
+        Assert.True(_swaps.Rows["swap"] is { FundingAttempted: false, FundingTxId: null, CompletedAt: null });
     }
 
     // The store may close the payment while the worker waits for the spend lock behind a withdrawal;
@@ -494,7 +529,7 @@ public class SatoraOutgoingWorkerTests
         _wallet.NotFound.Add("unknown");
         await _worker.TickAsync(Store, Ct);
 
-        var restarted = new TestWorker(_swaps, _wallets, _withdrawals, _log, _sentAlerts);
+        var restarted = new TestWorker(_swaps, _wallets, _renewals, _withdrawals, _log, _sentAlerts);
         await restarted.TickAsync(Store, Ct);
 
         Assert.Equal([Problems.UnknownToServer], _worker.Sent.Select(n => n.Problem));
@@ -524,7 +559,7 @@ public class SatoraOutgoingWorkerTests
         _swaps.Rows["swap"].PaymentHash = SatoraLightningCreditTests.PaymentHash;
         _wallet.NotFound.Add("swap");
         await _worker.TickAsync(Store, Ct);
-        var payments = new SatoraLightningPayments(_swaps, new FakeWalletAccess(_wallet, _events), NullLogger<SatoraLightningPayments>.Instance)
+        var payments = new SatoraLightningPayments(_swaps, new FakeWalletAccess(_wallet, _events), _renewals, NullLogger<SatoraLightningPayments>.Instance)
         {
             Clock = () => BOLT11PaymentRequest.Parse(SatoraLightningCreditTests.Bolt11, Network.Main).Timestamp.AddHours(1)
         };
@@ -919,9 +954,9 @@ public class SatoraOutgoingWorkerTests
         CreatedAt = FakeWallet.Locktime.AddDays(-20)
     };
 
-    private sealed class TestWorker(SatoraOutgoingSwaps swaps, SatoraWalletAccess wallets, SatoraWithdrawals withdrawals, ILogger<SatoraOutgoingWorker> logger,
-        SatoraSentAlerts? sentAlerts = null)
-        : SatoraOutgoingWorker(swaps, wallets, withdrawals, null!, sentAlerts ?? new MemorySentAlerts(), logger)
+    private sealed class TestWorker(SatoraOutgoingSwaps swaps, SatoraWalletAccess wallets, SatoraWalletRenewals renewals, SatoraWithdrawals withdrawals,
+        ILogger<SatoraOutgoingWorker> logger, SatoraSentAlerts? sentAlerts = null)
+        : SatoraOutgoingWorker(swaps, wallets, renewals, withdrawals, null!, sentAlerts ?? new MemorySentAlerts(), logger)
     {
         public List<SatoraLightningNotification> Sent { get; } = [];
 

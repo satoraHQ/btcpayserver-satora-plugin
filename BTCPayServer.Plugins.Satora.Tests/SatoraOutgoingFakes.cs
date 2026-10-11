@@ -33,6 +33,8 @@ public sealed class MemoryOutgoingSwaps(OutgoingEvents events) : SatoraOutgoingS
 
     public Exception? FundingAttemptedError { get; set; }
 
+    public Exception? ClearFundingAttemptedError { get; set; }
+
     // Thrown by the closes in SatoraWithdrawals, as a transaction that failed.
     public Exception? CompletionError { get; set; }
 
@@ -66,15 +68,26 @@ public sealed class MemoryOutgoingSwaps(OutgoingEvents events) : SatoraOutgoingS
         return Task.FromResult(open);
     }
 
-    public override Task<bool> SetFundingAttemptedAsync(string swapId)
+    public override Task<bool> SetFundingAttemptedAsync(string swapId, bool again = false)
     {
         events.Add($"attempted {swapId}");
         if (FundingAttemptedError is not null)
             throw FundingAttemptedError;
         BeforeFundingAttempted?.Invoke();
-        if (Rows[swapId].CompletedAt is not null)
+        if (Rows[swapId].CompletedAt is not null || again && !Rows[swapId].FundingAttempted)
             return Task.FromResult(false);
         Rows[swapId].FundingAttempted = true;
+        return Task.FromResult(true);
+    }
+
+    public override Task<bool> ClearFundingAttemptedAsync(string swapId)
+    {
+        events.Add($"undo {swapId}");
+        if (ClearFundingAttemptedError is not null)
+            throw ClearFundingAttemptedError;
+        if (Rows[swapId] is not { CompletedAt: null, FundingTxId: null } row)
+            return Task.FromResult(false);
+        row.FundingAttempted = false;
         return Task.FromResult(true);
     }
 
@@ -174,6 +187,9 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
     // Awaited by SendArkadeAsync before it returns.
     public Task SendGate { get; set; } = Task.CompletedTask;
     public Exception? SettleError { get; set; }
+    // What RenewArkadeAsync returns, unless RenewError is set.
+    public string? RenewedBatch { get; set; }
+    public Exception? RenewError { get; set; }
     public LightningSendQuote? LightningQuote { get; set; }
     // The quote for a destination, instead of LightningQuote for every one.
     public Func<SdkLightningDestination, LightningSendQuote>? QuoteFor { get; set; }
@@ -182,6 +198,7 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
     // Thrown by both Lightning quotes.
     public Exception? QuoteError { get; set; }
     public OffboardQuote OffboardQuote { get; set; } = new(50_000, 200);
+    public Exception? OffboardQuoteError { get; set; }
 
     public Task<ArkadeBalance> GetBalanceAsync() => Task.FromResult(Balance);
 
@@ -196,6 +213,12 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
         return Task.FromResult<string?>("commitment");
     }
 
+    public Task<string?> RenewArkadeAsync()
+    {
+        events.Add("renew");
+        return RenewError is null ? Task.FromResult(RenewedBatch) : throw RenewError;
+    }
+
     public async Task<string> SendArkadeAsync(string destination, ulong amountSats)
     {
         events.Add($"send {destination} {amountSats}");
@@ -206,6 +229,8 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
     public Task<OffboardQuote> GetOffboardQuoteAsync(string address, ulong? amountSats)
     {
         events.Add($"offboard quote {address} {amountSats?.ToString() ?? "all"}");
+        if (OffboardQuoteError is not null)
+            throw OffboardQuoteError;
         return Task.FromResult(OffboardQuote);
     }
 
@@ -298,6 +323,19 @@ public sealed class MemoryWithdrawals(OutgoingEvents events, MemoryOutgoingSwaps
         if (swaps is not null)
             await swaps.AddAsync(swap);
         Rows[withdrawalId].SwapId = swap.SwapId;
+    }
+
+    public override Task<bool> MoveSwapAsync(string withdrawalId, string swapId)
+    {
+        events.Add($"move {swapId} to {withdrawalId}");
+        if (swaps!.Rows.GetValueOrDefault(swapId) is not { FundingAttempted: false, CompletedAt: null } ||
+            Rows[withdrawalId] is not { Status: SatoraWithdrawalStatus.Pending, SwapId: null } withdrawal ||
+            Rows.Values.Any(w => w.SwapId == swapId && w.Status != SatoraWithdrawalStatus.Failed))
+            return Task.FromResult(false);
+        foreach (var failed in Rows.Values.Where(w => w.SwapId == swapId))
+            failed.SwapId = null;
+        withdrawal.SwapId = swapId;
+        return Task.FromResult(true);
     }
 
     public override Task SetAmountsAsync(string id, long? amountSats, long? feeSats)

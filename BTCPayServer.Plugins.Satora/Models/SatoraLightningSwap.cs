@@ -31,7 +31,8 @@ public class SatoraLightningSwap
     public DateTimeOffset ExpiresAt { get; set; }
 
     // Outgoing only. Set before the first FundArkadeSwapAsync; from then on the VHTLC may hold the
-    // wallet's sats, and only the worker decides what happened.
+    // wallet's sats, and only the worker decides what happened. Cleared again only when the SDK
+    // refused that first call for funds about to expire, before it recorded or sent anything.
     public bool FundingAttempted { get; set; }
 
     // Outgoing only: the sats the VHTLC takes from the wallet, invoice amount plus the swap's fees.

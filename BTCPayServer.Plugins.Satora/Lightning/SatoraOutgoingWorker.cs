@@ -15,6 +15,7 @@ namespace BTCPayServer.Plugins.Satora.Lightning;
 public class SatoraOutgoingWorker(
     SatoraOutgoingSwaps swaps,
     SatoraWalletAccess wallets,
+    SatoraWalletRenewals renewals,
     SatoraWithdrawals withdrawals,
     SatoraNotifier notifier,
     SatoraSentAlerts sentAlerts,
@@ -222,8 +223,8 @@ public class SatoraOutgoingWorker(
                 if (SatoraOutgoingActions.RefundsWithoutServer(swap, SatoraOutgoingActions.Decide(swap, swap.Status), UtcNow))
                     return null;
                 // The store closes a payment under the same lock: one it closed while this waited is
-                // not funded.
-                if (!await swaps.SetFundingAttemptedAsync(swap.SwapId))
+                // not funded, nor one whose refused first attempt a payment undid.
+                if (!await swaps.SetFundingAttemptedAsync(swap.SwapId, again: true))
                     throw new SatoraSwapClosedException(swap.SwapId);
                 return await wallet.FundArkadeSwapAsync(swap.SwapId);
             }, stoppingToken);
@@ -240,7 +241,8 @@ public class SatoraOutgoingWorker(
         }
         catch (SatoraSwapClosedException)
         {
-            logger.LogInformation("Outgoing Satora Lightning swap {SwapId} of store {StoreId} was closed before it was funded again", swap.SwapId, swap.StoreId);
+            logger.LogInformation("Outgoing Satora Lightning swap {SwapId} of store {StoreId} was closed, or its first funding attempt undone, before it was funded again",
+                swap.SwapId, swap.StoreId);
             await ForgetAsync(swap);
             return FundingOutcome.Closed;
         }
@@ -255,6 +257,14 @@ public class SatoraOutgoingWorker(
             logger.LogInformation("Outgoing Satora Lightning swap {SwapId} of store {StoreId} ended unfunded", swap.SwapId, swap.StoreId);
             await CloseAsync(swap);
             return FundingOutcome.Closed;
+        }
+        // Funds about to expire wait for a renewal, which the next attempt follows.
+        catch (Exception e) when (SatoraWalletRenewals.NeedsRenewal(e))
+        {
+            logger.LogInformation("Funding outgoing Satora Lightning swap {SwapId} of store {StoreId} waits for funds about to expire to be renewed ({Reason})",
+                swap.SwapId, swap.StoreId, e.Message);
+            renewals.Start(swap.StoreId);
+            return FundingOutcome.Failed;
         }
         catch (Exception e) when (!stoppingToken.IsCancellationRequested)
         {

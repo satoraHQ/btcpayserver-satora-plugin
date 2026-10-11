@@ -229,5 +229,5 @@ public class SatoraLightningClientTests : IDisposable
 
     private static SatoraLightningClient Offline(SatoraBitcoinNetwork network) => new(
         "store", Key, Network.Main, null!, null!, new SatoraLightningInvoiceHub(), new SatoraClaimWindow(network),
-        new SatoraLightningPayments(null!, null!, NullLogger<SatoraLightningPayments>.Instance), NullLogger<SatoraLightningClient>.Instance);
+        new SatoraLightningPayments(null!, null!, null!, NullLogger<SatoraLightningPayments>.Instance), NullLogger<SatoraLightningClient>.Instance);
 }
