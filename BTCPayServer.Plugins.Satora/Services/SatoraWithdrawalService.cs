@@ -27,8 +27,9 @@ public enum SatoraWithdrawResultKind
     Failed
 }
 
-// Error: for a Failed withdrawal, why nothing was sent.
-public sealed record SatoraWithdrawResult(SatoraWithdrawResultKind Kind, string Message, string? Error = null);
+// Error: for a Failed withdrawal, why nothing was sent. Renewing: it failed only because funds it
+// needed were about to expire, and their renewal has started.
+public sealed record SatoraWithdrawResult(SatoraWithdrawResultKind Kind, string Message, string? Error = null, bool Renewing = false);
 
 public enum SatoraAutoWithdrawOutcome
 {
@@ -91,6 +92,8 @@ public class SatoraWithdrawalService(
     public const string UnresolvedMessage =
         "A withdrawal's outcome is unknown. Check the wallet's balance and mark it sent or failed before withdrawing again.";
     public const string ExpiringFundsMessage = "Some of the wallet's funds are about to expire. They are being renewed. Try again in a minute.";
+    public const string AutoExpiringFundsMessage =
+        "Some of the wallet's funds are about to expire. They are being renewed. Automatic withdrawal tries again within a few minutes.";
     public const string CloseConfirmationWord = "CLOSE";
     private const decimal MaxFeePercentLimit = 10m;
     // arkd's dust (330 sats today): the least an automatic withdrawal sends, and the least recoverable
@@ -270,6 +273,8 @@ public class SatoraWithdrawalService(
         withdrawals.ResolveAsync(storeId, id, sent, IsRunning(id), DateTimeOffset.UtcNow);
 
     public bool IsRunning(string withdrawalId) => _running.ContainsKey(withdrawalId);
+
+    public bool IsWithdrawing(string storeId) => _running.Values.Contains(storeId);
 
     // The owner's automatic withdrawal rule, applied as soon as it is saved. Only what holds whatever
     // the wallet holds is checked, as the wallet is often empty when the rule is set up: the
@@ -455,7 +460,7 @@ public class SatoraWithdrawalService(
     {
         if (Network is null)
             return new(SatoraSettleOutcome.Blocked, Unavailable ?? "Satora is not available on this server's network.");
-        if (_running.Values.Contains(storeId))
+        if (IsWithdrawing(storeId))
             return new(SatoraSettleOutcome.Blocked, "A withdrawal is still running. Settle once it has finished.");
         try
         {
@@ -539,7 +544,7 @@ public class SatoraWithdrawalService(
             plan = planned!;
         }
         // The exit leaves out VTXOs about to expire and is refused while too little is left besides
-        // them, which a later tick, after a settle or new payments, can change.
+        // them, which a later tick, after a renewal, a settle or new payments, can change.
         catch (SdkException e) when (target.Type == SatoraWithdrawalType.Bitcoin && e.Kind == SdkErrorKind.InvalidSwap)
         {
             logger.LogInformation("The automatic exit of store {StoreId} cannot be quoted yet ({Reason}); trying again later", storeId, e.Message);
@@ -561,6 +566,9 @@ public class SatoraWithdrawalService(
         });
         return result?.Kind switch
         {
+            // Like an exit that cannot be quoted yet: a later visit, after the renewal, can send.
+            SatoraWithdrawResultKind.Failed when result.Renewing =>
+                AutoResult(SatoraAutoWithdrawOutcome.Waiting, "some of the wallet's funds are about to expire and are being renewed"),
             SatoraWithdrawResultKind.Sent => AutoResult(SatoraAutoWithdrawOutcome.Sent, result.Message),
             SatoraWithdrawResultKind.Pending => new SatoraAutoWithdrawResult(SatoraAutoWithdrawOutcome.Pending, result.Message, withdrawal.Id),
             SatoraWithdrawResultKind.Unknown => AutoResult(SatoraAutoWithdrawOutcome.Unknown, result.Message),
@@ -919,12 +927,16 @@ public class SatoraWithdrawalService(
 
     private async Task<SatoraWithdrawResult> FailAsync(SatoraWithdrawal withdrawal, string message, Exception? error)
     {
-        if (SatoraWalletRenewals.IsExpiringRefusal(error))
-            message = StartRenewal(withdrawal.StoreId, error!);
+        var renewing = SatoraWalletRenewals.IsExpiringRefusal(error);
+        if (renewing)
+        {
+            StartRenewal(withdrawal.StoreId, error!);
+            message = withdrawal.Origin == SatoraWithdrawalOrigin.Auto ? AutoExpiringFundsMessage : ExpiringFundsMessage;
+        }
         else if (error is not null)
             logger.LogWarning(error, "Withdrawal {WithdrawalId} from the Satora wallet of store {StoreId} failed; nothing was sent", withdrawal.Id, withdrawal.StoreId);
         await withdrawals.SetOutcomeAsync(withdrawal.Id, SatoraWithdrawalStatus.Failed, null, message);
-        return new SatoraWithdrawResult(SatoraWithdrawResultKind.Failed, $"Nothing was sent: {message}", message);
+        return new SatoraWithdrawResult(SatoraWithdrawResultKind.Failed, $"Nothing was sent: {message}", message, renewing);
     }
 
     // The SDK refused a withdrawal the wallet cannot cover without its funds about to expire: they are

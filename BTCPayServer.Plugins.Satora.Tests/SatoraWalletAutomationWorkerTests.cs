@@ -32,6 +32,7 @@ public class SatoraWalletAutomationWorkerTests
     private readonly MemoryAutoWithdrawRules _rules = new();
     private readonly RecordingLogger<SatoraWalletAutomationWorker> _log = new();
     private readonly MemorySentAlerts _sentAlerts = new();
+    private readonly RecordingLogger<SatoraWalletRenewals> _renewalLog = new();
     private readonly TestWithdrawalService _service;
     private readonly TestWorker _worker;
 
@@ -44,7 +45,7 @@ public class SatoraWalletAutomationWorkerTests
         var renewals = new RecordingRenewals();
         _service = new TestWithdrawalService(_events, _wallets, _withdrawals, _rules,
             new SatoraLightningPayments(swaps, _wallets, renewals, NullLogger<SatoraLightningPayments>.Instance), renewals, swaps);
-        _worker = new TestWorker(_wallets, _service, _withdrawals, _rules, _log, _sentAlerts);
+        _worker = new TestWorker(_wallets, new SatoraWalletRenewals(_wallets, _renewalLog), _service, _withdrawals, _rules, _log, _sentAlerts);
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -114,6 +115,87 @@ public class SatoraWalletAutomationWorkerTests
 
         Assert.Equal(7, Settles);
         Assert.Equal([Kinds.SettleFailing, Kinds.SettleFailing], _worker.Sent.Select(n => n.Kind));
+    }
+
+    // Funds inside the SDK's expiry margin are left out of every send and turn recoverable only once
+    // expired, so each visit renews them, before it settles and withdraws, and logs each renewal.
+    [Fact]
+    public async Task RenewsFundsAboutToExpireOnEveryVisitBeforeSettling()
+    {
+        _wallet.Balance = new ArkadeBalance(90_000, 0, 10_000);
+        _wallet.RenewedBatch = "commitment-renew";
+
+        await Tick();
+        _wallet.RenewedBatch = null;
+        await Tick();
+
+        Assert.Equal(["renew (gated)", "settle (gated)", "renew (gated)"], _events.All);
+        var renewed = Assert.Single(_renewalLog.Entries);
+        Assert.Equal(LogLevel.Information, renewed.Level);
+        Assert.Contains("commitment-renew", renewed.Message, StringComparison.Ordinal);
+        Assert.Empty(_log.Entries);
+    }
+
+    [Fact]
+    public async Task DoesNotRenewAWalletWithNothingToSpend()
+    {
+        _wallet.Balance = new ArkadeBalance(0, 0, 10_000);
+
+        await Tick();
+
+        Assert.Equal(["settle (gated)"], _events.All);
+    }
+
+    // As the settle does, it leaves the wallet to a running withdrawal, and the next visit renews.
+    [Fact]
+    public async Task LeavesTheWalletToARunningWithdrawalAndRenewsOnTheNextVisit()
+    {
+        var finish = new TaskCompletionSource();
+        _wallet.SendGate = finish.Task;
+        var withdrawal = _service.ExecuteAsync(Store, new SatoraWithdrawRequest { Destination = Ark, AmountBtc = "0.00001", Key = "key" });
+        await _wallet.SendStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+
+        // A renewal waiting for the spend lock would hold the visit up until the withdrawal ends.
+        await Tick().WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        Assert.DoesNotContain("renew (gated)", _events.All);
+        finish.SetResult();
+        await withdrawal;
+        await Tick();
+
+        Assert.Single(_events.All, e => e == "renew (gated)");
+    }
+
+    // A failed renewal holds up neither the settle nor the withdrawal, and the next visit tries again.
+    [Fact]
+    public async Task AFailedRenewalIsLoggedAndTheVisitGoesOn()
+    {
+        _wallet.Balance = new ArkadeBalance(90_000, 0, 10_000);
+        _wallet.RenewError = new SdkException(SdkErrorKind.Transport, "renew: batch failed");
+
+        await Tick();
+        await Tick();
+
+        Assert.Equal(["renew (gated)", "settle (gated)", "renew (gated)"], _events.All);
+        Assert.Equal([LogLevel.Warning, LogLevel.Warning], _log.Entries.Select(e => e.Level));
+        Assert.Empty(_worker.Sent);
+    }
+
+    // A run refused for funds about to expire is tried again on the next visit, after a renewal,
+    // without the backoff or the alert of a failure.
+    [Fact]
+    public async Task AWithdrawalRefusedForFundsAboutToExpireIsTriedAgainOnTheNextVisitWithoutAlerting()
+    {
+        _rules.Set(Store, SatoraWithdrawalType.Arkade, Ark, 50_000, 0);
+        _wallet.SendError = new SdkException(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.ShortOfExpiring);
+
+        await TicksAt(0, 1);
+        _wallet.SendError = null;
+        await TicksAt(2);
+
+        Assert.Equal(3, _events.All.Count(e => e.StartsWith("send", StringComparison.Ordinal)));
+        Assert.Equal(2, _withdrawals.Rows.Values.Count(w => w is { Status: SatoraWithdrawalStatus.Failed, Error: SatoraWithdrawalService.AutoExpiringFundsMessage }));
+        Assert.Single(_withdrawals.Rows.Values, w => w.Status == SatoraWithdrawalStatus.Sent);
+        Assert.Empty(_worker.Sent);
     }
 
     [Fact]
@@ -217,7 +299,7 @@ public class SatoraWalletAutomationWorkerTests
         _withdrawals.Rows["interrupted"] = Withdrawal("interrupted", SatoraWithdrawalOrigin.Auto, SatoraWithdrawalStatus.Pending, _worker.Now.AddHours(-1));
         await Tick();
 
-        var restarted = new TestWorker(_wallets, _service, _withdrawals, _rules, _log, _sentAlerts) { Now = _worker.Now };
+        var restarted = new TestWorker(_wallets, new SatoraWalletRenewals(_wallets, _renewalLog), _service, _withdrawals, _rules, _log, _sentAlerts) { Now = _worker.Now };
         await restarted.TickAsync(Store, restarted.Now, Ct);
 
         Assert.Single(_worker.Sent);
@@ -373,9 +455,9 @@ public class SatoraWalletAutomationWorkerTests
         UpdatedAt = createdAt
     };
 
-    private sealed class TestWorker(SatoraWalletAccess wallets, SatoraWithdrawalService service, SatoraWithdrawals withdrawals,
+    private sealed class TestWorker(SatoraWalletAccess wallets, SatoraWalletRenewals renewals, SatoraWithdrawalService service, SatoraWithdrawals withdrawals,
         SatoraAutoWithdrawRules rules, ILogger<SatoraWalletAutomationWorker> logger, SatoraSentAlerts? sentAlerts = null)
-        : SatoraWalletAutomationWorker(null!, null!, wallets, service, withdrawals, rules, null!, sentAlerts ?? new MemorySentAlerts(), logger)
+        : SatoraWalletAutomationWorker(null!, null!, wallets, renewals, service, withdrawals, rules, null!, sentAlerts ?? new MemorySentAlerts(), logger)
     {
         public List<SatoraWalletNotification> Sent { get; } = [];
 

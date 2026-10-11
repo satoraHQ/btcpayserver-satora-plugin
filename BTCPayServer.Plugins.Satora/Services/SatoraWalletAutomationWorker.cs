@@ -2,19 +2,21 @@ using System.Collections.Concurrent;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Models;
 using Microsoft.EntityFrameworkCore;
+using ArkadeBalance = uniffi.satora_sdk_ffi.ArkadeBalance;
 using Kinds = BTCPayServer.Plugins.Satora.Services.SatoraWalletNotification.Kinds;
 using SatoraBitcoinNetwork = uniffi.satora_sdk_ffi.BitcoinNetwork;
 
 namespace BTCPayServer.Plugins.Satora.Services;
 
-// Settles the recoverable funds of every enabled store's wallet and runs its automatic withdrawal,
-// both through SatoraWithdrawalService with the store's spend lock held. Each store runs on its own
+// Renews the funds about to expire and settles the recoverable funds of every enabled store's wallet,
+// and runs its automatic withdrawal, each with the store's spend lock held. Each store runs on its own
 // task, apart from the Lightning and on-chain workers, so neither ever holds up a claim. A store
 // whose Satora is disabled is left alone, as disabling evicts its wallet once nothing needs it.
 public class SatoraWalletAutomationWorker(
     SatoraPluginDbContextFactory dbContextFactory,
     SatoraWalletRegistry registry,
     SatoraWalletAccess wallets,
+    SatoraWalletRenewals renewals,
     SatoraWithdrawalService withdrawalService,
     SatoraWithdrawals withdrawals,
     SatoraAutoWithdrawRules rules,
@@ -115,11 +117,11 @@ public class SatoraWalletAutomationWorker(
     // ends on a visit rather than just after one.
     internal async Task TickAsync(string storeId, DateTimeOffset now, CancellationToken stoppingToken)
     {
-        long recoverableSats;
+        ArkadeBalance balance;
         try
         {
             var wallet = await wallets.GetAsync(storeId);
-            recoverableSats = (long)(await wallet.GetBalanceAsync().WaitAsync(BalanceTimeout, stoppingToken)).recoverableSats;
+            balance = await wallet.GetBalanceAsync().WaitAsync(BalanceTimeout, stoppingToken);
         }
         catch (Exception e) when (!stoppingToken.IsCancellationRequested)
         {
@@ -129,9 +131,33 @@ public class SatoraWalletAutomationWorker(
         }
         if (_unreadable.TryRemove(storeId, out _))
             logger.LogInformation("The Satora wallet of store {StoreId} can be read again", storeId);
-        await SettleAsync(storeId, recoverableSats, now, stoppingToken);
+        if (balance.confirmedSats + balance.preConfirmedSats > 0)
+            await RenewAsync(storeId, stoppingToken);
+        await SettleAsync(storeId, (long)balance.recoverableSats, now, stoppingToken);
         await AlertInterruptedAsync(storeId, now);
         await WithdrawAsync(storeId, now, stoppingToken);
+    }
+
+    // VTXOs within the SDK's expiry margin are left out of every send, swap funding and exit, and only
+    // turn recoverable once expired, so each visit renews them, under the gates the settle takes. The
+    // margin is at most half a VTXO's life and at most 10 minutes: 256 s on regtest, visited every
+    // 30 s, and 8 to 10 minutes on mainnet, visited every 5. A failed renewal is tried again on the
+    // next visit; funds it misses turn recoverable and are settled.
+    private async Task RenewAsync(string storeId, CancellationToken stoppingToken)
+    {
+        if (withdrawalService.IsWithdrawing(storeId))
+            return;
+        try
+        {
+            await renewals.RenewAsync(storeId, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception e) when (!stoppingToken.IsCancellationRequested)
+        {
+            logger.LogWarning(e, "Renewing the funds about to expire in the Satora wallet of store {StoreId} failed; trying again on the next visit", storeId);
+        }
     }
 
     // Recoverable funds depend on the Arkade server until they are settled, so they are settled within

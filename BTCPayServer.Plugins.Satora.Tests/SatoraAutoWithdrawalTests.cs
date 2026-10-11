@@ -123,6 +123,29 @@ public class SatoraAutoWithdrawalTests
         Assert.Null(log.Errors[0]);
     }
 
+    // Each send, exit and swap funding leaves out funds about to expire. A run refused for them
+    // waits for their renewal, as an exit that cannot be quoted yet does, and its row says why.
+    [Theory]
+    [InlineData(SatoraWithdrawalType.Arkade)]
+    [InlineData(SatoraWithdrawalType.Bitcoin)]
+    [InlineData(SatoraWithdrawalType.LightningAddress)]
+    public async Task ARunRefusedForFundsAboutToExpireWaitsForTheirRenewal(SatoraWithdrawalType type)
+    {
+        var refusal = new SdkException(SdkErrorKind.InvalidSwap, SatoraWalletRenewalsTests.ShortOfExpiring);
+        _rules.Set(Store, type, type switch { SatoraWithdrawalType.Arkade => Ark, SatoraWithdrawalType.Bitcoin => OnChain, _ => Alice }, 50_000, 0);
+        if (type == SatoraWithdrawalType.LightningAddress)
+            _wallet.FundError = refusal;
+        else
+            _wallet.SendError = refusal;
+
+        var result = await _service.ExecuteAutoAsync(Store, Ct);
+
+        Assert.Equal((SatoraAutoWithdrawOutcome.Waiting, "some of the wallet's funds are about to expire and are being renewed"), (result.Outcome, result.Message));
+        Assert.True(Assert.Single(_withdrawals.Rows.Values) is
+            { Origin: SatoraWithdrawalOrigin.Auto, Status: SatoraWithdrawalStatus.Failed, Error: SatoraWithdrawalService.AutoExpiringFundsMessage });
+        Assert.Equal([Store], _renewals.Started);
+    }
+
     [Theory]
     [InlineData(SatoraWithdrawalType.Bitcoin, "the fee of 200 sats is more than the maximum fee of 5 sats, 0.01% of 50000 sats")]
     [InlineData(SatoraWithdrawalType.LightningAddress, "the fee of 55 sats is more than the maximum fee of 1 sats, 0.01% of 12345 sats")]

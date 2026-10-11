@@ -430,8 +430,10 @@ automatic withdrawal runs like a manual one, under the same spending lock, and
 is listed with an **Automatic** badge. A run that sends nothing, including a
 Lightning payment refunded to the wallet, is retried after 5 minutes, 15
 minutes, an hour and then every 6 hours, until one goes out or the rule is
-saved again. BTCPay notifies the store's owners and the server admins once two
-runs in a row have failed. A run cut short by a BTCPay restart is marked
+saved again. A run refused because funds it needs are about to expire does not
+count as a failure: it is tried again at the next check, after they are
+renewed. BTCPay notifies the store's owners and the server admins once two runs
+in a row have failed. A run cut short by a BTCPay restart is marked
 interrupted, like a manual withdrawal, and holds up every withdrawal until
 someone marks it sent or failed. BTCPay notifies the store about it once it is
 30 minutes old.
@@ -454,17 +456,19 @@ Lightning payout processor is on. Without one every run empties the wallet, and
 payouts and refunds find nothing to pay from. The withdrawals page warns about
 this.
 
-Automatic withdrawal and automatic settling stop while the store's Satora
-wallet is disabled. Replacing the wallet with a new seed turns automatic
-withdrawal off but keeps its settings. Restoring the same wallet leaves it on.
+Automatic withdrawal, settling and renewal stop while the store's Satora wallet
+is disabled. Replacing the wallet with a new seed turns automatic withdrawal
+off but keeps its settings. Restoring the same wallet leaves it on.
 
-VTXOs are not renewed before they expire. Funds turn recoverable when each
-VTXO expires, and are settled within minutes, as above.
+Funds about to expire are renewed automatically at each check, in an Arkade
+batch of their own, so they stay spendable. A failed renewal is tried again at
+the next check. Funds it misses turn recoverable when they expire, and are
+settled as above.
 
 For a destination that is not always online, withdraw to a Lightning or Bitcoin
 address instead of an Arkade address. The VTXOs an Arkade withdrawal delivers,
 by hand or automatic, expire when the ones they were paid from would have,
-which can be minutes later (seconds on regtest, with 512 second VTXOs). A
+which can be only minutes later (about 4 on regtest, with 512 second VTXOs). A
 destination wallet that is not online to settle them by then depends on the
 Arkade server to get them back.
 
