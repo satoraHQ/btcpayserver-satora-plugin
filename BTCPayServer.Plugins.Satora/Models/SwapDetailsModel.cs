@@ -21,10 +21,5 @@
         public string? ReceiveAmount { get; set; }
         public string? ReceiveToken { get; set; }
         public string? BackendError { get; set; }
-
-        // Default destination for the Claim step — derived from the
-        // plugin's mnemonic at page-render time so the operator can see
-        // (and override) what would be used.
-        public string? DerivedArkadeAddress { get; set; }
     }
 }

@@ -23,8 +23,8 @@
         <td>
             <br />
             <p>
-                Allows your customers to pay with stablecoins that are not supported by BTCPay Server, using<br /><a href="https://satora.io" target="_blank">Satora service</a>, in a seamless and non custodial way.<br />
-                Please read our documentation <a href="https://github.com/Nisaba/btcpayserver-plugins/blob/master/BTCPayServer.Plugins.Satora/README.md" target="_blank">here</a>.
+                Gives this store its own <a href="https://satora.io" target="_blank" rel="noreferrer noopener">Satora</a> wallet, which runs on Arkade. This page shows the wallet's balance and the store's earlier stablecoin swaps.<br />
+                Read the <a href="https://github.com/satoraHQ/btcpayserver-satora-plugin#readme" target="_blank" rel="noreferrer noopener">documentation</a>.
             </p>
         </td>
     </tr>
@@ -130,7 +130,7 @@
 
         <div class="widget store-wallet-balance">
             <div class="d-flex gap-3 align-items-center justify-content-between mb-2">
-                <h6>Arkade Wallet Balance</h6>
+                <h6>Satora wallet balance</h6>
             </div>
             <div class="balances d-flex flex-wrap gap-4">
                 <div class="balance">
@@ -160,7 +160,7 @@
 
 
 
-    <h4>Satora Customers Transactions</h4>
+    <h4>Earlier stablecoin swaps</h4>
 
     @if (!Model.Transactions.Any())
     {

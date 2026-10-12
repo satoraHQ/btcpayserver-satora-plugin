@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- Same test stack and versions as btcpayserver/BTCPayServer.Tests -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageReference Include="xunit.v3" Version="4.0.0" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!--
+    The plugin references BTCPay with StaticWebAssetsEnabled=false. Doing the same here (and building
+    the plugin without it, as a solution build does) keeps MSBuild from building any project twice
+    with different global properties. The direct BTCPay reference brings BTCPay's assemblies and
+    packages, which the plugin keeps out of its own output, so tests can use BTCPay types.
+  -->
+  <ItemDefinitionGroup>
+    <ProjectReference>
+      <Properties>StaticWebAssetsEnabled=false</Properties>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BTCPayServer.Plugins.Satora\BTCPayServer.Plugins.Satora.csproj" Properties="" />
+    <ProjectReference Include="..\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
+  </ItemGroup>
+
+</Project>

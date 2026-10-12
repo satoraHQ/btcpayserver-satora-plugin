@@ -9,17 +9,15 @@ public class Plugin : BaseBTCPayServerPlugin
 {
     public override IBTCPayServerPlugin.PluginDependency[] Dependencies { get; } =
     {
-        new() { Identifier = nameof(BTCPayServer), Condition = ">=2.3.7" },
+        new() { Identifier = nameof(BTCPayServer), Condition = ">=2.4.2" },
     };
 
     public override void Execute(IServiceCollection services)
     {
+        // The old stablecoin checkout extensions and SatoraSwapWatcher are not registered; see SatoraSwapController.
         services.AddUIExtension("store-wallets-nav", "SatoraPluginHeaderNav")
-                .AddUIExtension("checkout-payment-method", "CheckoutV2/CheckoutSatoraPaymentMethodExtension")
-                .AddUIExtension("checkout-payment", "CheckoutV2/CheckoutSatoraPaymentExtension")
                 .AddSingleton<SatoraPluginDbContextFactory>()
                 .AddHostedService<PluginMigrationRunner>()
-                .AddHostedService<SatoraSwapWatcher>()
                 .AddSingleton<SatoraSettlementService>()
                 .AddSingleton<SatoraService>()
                 .AddSingleton<SatoraPluginService>();
