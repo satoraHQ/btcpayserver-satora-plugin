@@ -15,6 +15,7 @@ public class SatoraWalletService(
     SatoraWalletRegistry registry,
     SatoraStoreLightningConfig lightningConfig,
     SatoraStoreChainConfig chainConfig,
+    SatoraAutoWithdrawRules autoWithdrawRules,
     SatoraLightningCredit lightningInvoices,
     ILogger<SatoraWalletService> logger)
 {
@@ -286,6 +287,10 @@ public class SatoraWalletService(
                     settings.Enabled = false;
                     settings.WalletCreated = now;
                     settings.LightningConnectionKey = NewConnectionKey();
+                    // The automatic withdrawal rule was set up for the wallet this one replaces. It goes
+                    // off before the new seed is saved, so a failed save can leave it off, never on for
+                    // the new wallet.
+                    await autoWithdrawRules.DisableAsync(storeId, now);
                 }
                 await ctx.SaveChangesAsync();
                 registry.SetLightningKey(storeId, settings.LightningConnectionKey);

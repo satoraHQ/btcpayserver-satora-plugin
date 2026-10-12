@@ -16,6 +16,7 @@ namespace BTCPayServer.Plugins.Satora.Controllers;
 public class SatoraWithdrawController(SatoraWithdrawalService withdrawalService) : Controller
 {
     private const string ReviewKey = "SatoraWithdrawReview";
+    private const string AutoWithdrawFormKey = "SatoraAutoWithdrawForm";
 
     [HttpGet]
     public async Task<IActionResult> Index([FromRoute] string storeId)
@@ -23,6 +24,11 @@ public class SatoraWithdrawController(SatoraWithdrawalService withdrawalService)
         var model = await withdrawalService.GetPageAsync(storeId);
         if (TempData[ReviewKey] is string review)
             model.Review = JsonSerializer.Deserialize<SatoraWithdrawReview>(review);
+        // A refused form is shown again only for the rule it was loaded with: refilled over a rule
+        // changed since, with that rule's version, one more save would undo the change unseen.
+        if (TempData[AutoWithdrawFormKey] is string form &&
+            JsonSerializer.Deserialize<SatoraAutoWithdrawRequest>(form) is { } entered && entered.Version == model.AutoWithdraw?.Version)
+            model.AutoWithdrawForm = entered;
         return View(model);
     }
 
@@ -46,8 +52,28 @@ public class SatoraWithdrawController(SatoraWithdrawalService withdrawalService)
     [HttpPost("settle")]
     public async Task<IActionResult> Settle([FromRoute] string storeId)
     {
-        var (success, message) = await withdrawalService.SettleAsync(storeId);
-        TempData[success ? WellKnownTempData.SuccessMessage : WellKnownTempData.ErrorMessage] = message;
+        var result = await withdrawalService.SettleAsync(storeId);
+        var success = result.Outcome is SatoraSettleOutcome.Settled or SatoraSettleOutcome.NothingToSettle;
+        TempData[success ? WellKnownTempData.SuccessMessage : WellKnownTempData.ErrorMessage] = result.Message;
+        return RedirectToAction(nameof(Index), new { storeId });
+    }
+
+    [HttpPost("auto/save")]
+    public async Task<IActionResult> SaveAutoWithdraw([FromRoute] string storeId, SatoraAutoWithdrawRequest request)
+    {
+        var (saved, message) = await withdrawalService.SaveAutoWithdrawAsync(storeId, request);
+        TempData[saved ? WellKnownTempData.SuccessMessage : WellKnownTempData.ErrorMessage] = message;
+        if (!saved)
+            TempData[AutoWithdrawFormKey] = JsonSerializer.Serialize(request);
+        return RedirectToAction(nameof(Index), new { storeId });
+    }
+
+    [HttpPost("auto/disable")]
+    public async Task<IActionResult> DisableAutoWithdraw([FromRoute] string storeId)
+    {
+        TempData[WellKnownTempData.SuccessMessage] = await withdrawalService.DisableAutoWithdrawAsync(storeId)
+            ? "Automatic withdrawal is off."
+            : "Automatic withdrawal was off already.";
         return RedirectToAction(nameof(Index), new { storeId });
     }
 

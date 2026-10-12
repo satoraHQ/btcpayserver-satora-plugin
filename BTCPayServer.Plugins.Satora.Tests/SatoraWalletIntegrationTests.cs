@@ -114,6 +114,8 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
         await ReadyAndEnabled(wallets, "replace");
         var old = await db.Settings("replace");
         var oldWallet = await registry.GetAsync("replace");
+        var rules = new SatoraAutoWithdrawRules(db.Contexts);
+        await rules.SaveAsync(AutoWithdrawRule("replace"), null, DateTimeOffset.UtcNow);
 
         var (refusal, phrase) = await wallets.GenerateAsync("replace", null);
 
@@ -133,6 +135,32 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
             (retired.Format, retired.Ciphertext, retired.SeedFingerprint));
         await AssertDisposed(oldWallet);
         Assert.NotSame(oldWallet, await registry.GetAsync("replace"));
+        Assert.True(await rules.GetAsync("replace") is { Enabled: false, Destination: "tark1destination" });
+    }
+
+    // A rule set up for the wallet a new seed replaces must not send the new wallet's funds; restoring
+    // the same wallet brings back the wallet it was set up for.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task ANewWalletTurnsAutomaticWithdrawalOffAndTheSameWalletRestoredKeepsItOn()
+    {
+        var (_, wallets) = db.Wallets();
+        var rules = new SatoraAutoWithdrawRules(db.Contexts);
+        var phrase = await ReadyAndEnabled(wallets, "auto-same");
+        await using (var ctx = db.Contexts.CreateContext())
+        {
+            ctx.SatoraSettings.Add(new SatoraSettings { StoreId = "auto-legacy", Enabled = true, CryptedSeed = Database.LegacyCiphertext });
+            await ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
+        }
+        foreach (var store in new[] { "auto-same", "auto-new", "auto-legacy" })
+            Assert.True((await rules.SaveAsync(AutoWithdrawRule(store), null, DateTimeOffset.UtcNow)).Saved);
+
+        Assert.Equal(SeedWriteRefusal.None, await wallets.RestoreAsync("auto-same", phrase, null));
+        Assert.Equal(SeedWriteRefusal.None, (await wallets.GenerateAsync("auto-new", null)).Refusal);
+        Assert.Equal(SeedWriteRefusal.None, await wallets.RestoreAsync("auto-legacy", SatoraMnemonic.Generate(), null));
+
+        Assert.True(await rules.GetAsync("auto-same") is { Enabled: true, Version: 1 });
+        Assert.True(await rules.GetAsync("auto-new") is { Enabled: false, Destination: "tark1destination" });
+        Assert.True(await rules.GetAsync("auto-legacy") is { Enabled: false, Destination: "tark1destination" });
     }
 
     [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
@@ -634,6 +662,16 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
         }
     }
 
+    private static SatoraAutoWithdrawRule AutoWithdrawRule(string storeId) => new()
+    {
+        StoreId = storeId,
+        DestinationType = SatoraWithdrawalType.Arkade,
+        Destination = "tark1destination",
+        ThresholdSats = 100_000,
+        ReserveSats = 0,
+        MaxFeeBps = 100
+    };
+
     private static async Task<string> ReadyAndEnabled(SatoraWalletService wallets, string storeId)
     {
         var (refusal, phrase) = await wallets.GenerateAsync(storeId, null);
@@ -682,21 +720,10 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
             var nbx = new NBXplorerNetworkProvider(ChainName.Regtest);
             _networks = new BTCPayNetworkProvider([new BTCPayNetwork { CryptoCode = "BTC", NBXplorerNetwork = nbx.GetFromCryptoCode("BTC") }], nbx, new Logs());
 
-            // A database as master leaves it, with a legacy seed and a swap row. Migrator.MigrateAsync(target)
-            // only looks targets up by 14 digit ids, so master's migrations are applied as it would apply them.
+            // A database as master leaves it, with a legacy seed and a swap row.
             await using (var ctx = _contexts.CreateContext())
             {
-                var assembly = ctx.GetService<IMigrationsAssembly>();
-                var generator = ctx.GetService<IMigrationsSqlGenerator>();
-                var history = ctx.GetService<IHistoryRepository>();
-                await ctx.Database.ExecuteSqlRawAsync(history.GetCreateIfNotExistsScript());
-                foreach (var (id, type) in assembly.Migrations.Where(m => string.CompareOrdinal(m.Key, MasterMigration) <= 0))
-                {
-                    var migration = assembly.CreateMigration(type, ctx.Database.ProviderName!);
-                    foreach (var command in generator.Generate(migration.UpOperations))
-                        await ctx.Database.ExecuteSqlRawAsync(command.CommandText);
-                    await ctx.Database.ExecuteSqlRawAsync(history.GetInsertScript(new HistoryRow(id, ProductInfo.GetVersion())));
-                }
+                await MigrateUpToAsync(ctx, MasterMigration);
                 await ctx.Database.ExecuteSqlRawAsync(
                     $"INSERT INTO {Schema}.\"SatoraSettings\" (\"StoreId\", \"Enabled\", \"CryptedSeed\") VALUES ('{LegacyStore}', true, '{LegacyCiphertext}')");
             }
@@ -704,6 +731,23 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
             // What PluginMigrationRunner does at startup.
             await using (var ctx = _contexts.CreateContext())
                 await ctx.Database.MigrateAsync();
+        }
+
+        // Applies the plugin's migrations up to and including lastId, as a deployment that stopped there
+        // applied them. Migrator.MigrateAsync(target) only looks targets up by 14 digit ids.
+        public static async Task MigrateUpToAsync(SatoraPluginDbContext ctx, string lastId)
+        {
+            var assembly = ctx.GetService<IMigrationsAssembly>();
+            var generator = ctx.GetService<IMigrationsSqlGenerator>();
+            var history = ctx.GetService<IHistoryRepository>();
+            await ctx.Database.ExecuteSqlRawAsync(history.GetCreateIfNotExistsScript());
+            foreach (var (id, type) in assembly.Migrations.Where(m => string.CompareOrdinal(m.Key, lastId) <= 0))
+            {
+                var migration = assembly.CreateMigration(type, ctx.Database.ProviderName!);
+                foreach (var command in generator.Generate(migration.UpOperations))
+                    await ctx.Database.ExecuteSqlRawAsync(command.CommandText);
+                await ctx.Database.ExecuteSqlRawAsync(history.GetInsertScript(new HistoryRow(id, ProductInfo.GetVersion())));
+            }
         }
 
         public async ValueTask DisposeAsync()
@@ -732,7 +776,7 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
             var registry = new SatoraWalletRegistry(_contexts, protector, null!, _networks, configuration,
                 Options.Create(new DataDirectories { DataDir = DataDir }), registryLogger ?? NullLogger<SatoraWalletRegistry>.Instance);
             _registries.Add(registry);
-            return (registry, new SatoraWalletService(_contexts, protector, registry, LightningConfig, ChainConfig,
+            return (registry, new SatoraWalletService(_contexts, protector, registry, LightningConfig, ChainConfig, new SatoraAutoWithdrawRules(_contexts),
                 LightningInvoices, logger ?? NullLogger<SatoraWalletService>.Instance));
         }
 

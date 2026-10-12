@@ -68,6 +68,14 @@ public class SatoraWithdrawals(SatoraPluginDbContextFactory dbContextFactory)
             .ToListAsync();
     }
 
+    // Pending or Unknown, of any origin and with a swap or not.
+    public virtual async Task<bool> HasOpenAsync(string storeId)
+    {
+        await using var ctx = dbContextFactory.CreateContext();
+        return await ctx.SatoraWithdrawals.AnyAsync(w =>
+            w.StoreId == storeId && (w.Status == SatoraWithdrawalStatus.Pending || w.Status == SatoraWithdrawalStatus.Unknown));
+    }
+
     // The swap row and the withdrawal's link to it are written together, so a withdrawal never
     // points at a swap that is not recorded, nor a recorded swap's withdrawal at none.
     public virtual async Task AttachSwapAsync(string withdrawalId, SatoraLightningSwap swap)

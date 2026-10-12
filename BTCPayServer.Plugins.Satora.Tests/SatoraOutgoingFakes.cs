@@ -1,7 +1,12 @@
 using System.Text.Json;
+using BTCPayServer.Lightning;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Plugins.Satora.Services;
+using LNURL;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using NBitcoin;
 using Satora.Sdk;
 using ArkadeBalance = uniffi.satora_sdk_ffi.ArkadeBalance;
 using SdkArkadeSpend = uniffi.satora_sdk_ffi.ArkadeSpend;
@@ -184,8 +189,9 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
     // Awaited by AmountsForSwapAsync before it answers.
     public Func<Task> AmountsGate { get; set; } = () => Task.CompletedTask;
     public Exception? SendError { get; set; }
-    // Awaited by SendArkadeAsync before it returns.
+    // Awaited by SendArkadeAsync before it returns, once it has completed SendStarted.
     public Task SendGate { get; set; } = Task.CompletedTask;
+    public TaskCompletionSource SendStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Exception? SettleError { get; set; }
     // What RenewArkadeAsync returns, unless RenewError is set.
     public string? RenewedBatch { get; set; }
@@ -197,10 +203,20 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
     public Quote SendMaxQuote { get; set; } = new("1.0", 10, 0, 45, 0.003, 1_000, 1_000_000, "100000", "100000", "100000", "12345", null);
     // Thrown by both Lightning quotes.
     public Exception? QuoteError { get; set; }
+    // What an exit of everything sends; an exit of an amount sends that amount, at the same fee.
     public OffboardQuote OffboardQuote { get; set; } = new(50_000, 200);
     public Exception? OffboardQuoteError { get; set; }
+    // Runs as the balance is read.
+    public Action? DuringBalanceRead { get; set; }
+    public string ArkadeAddress { get; set; } = "ark1own";
 
-    public Task<ArkadeBalance> GetBalanceAsync() => Task.FromResult(Balance);
+    public Task<ArkadeBalance> GetBalanceAsync()
+    {
+        DuringBalanceRead?.Invoke();
+        return Task.FromResult(Balance);
+    }
+
+    public Task<string> GetArkadeAddressAsync() => Task.FromResult(ArkadeAddress);
 
     public Task<string?> SettleArkadeAsync()
     {
@@ -222,6 +238,7 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
     public async Task<string> SendArkadeAsync(string destination, ulong amountSats)
     {
         events.Add($"send {destination} {amountSats}");
+        SendStarted.TrySetResult();
         await SendGate;
         return SendError is null ? "ark-send" : throw SendError;
     }
@@ -231,7 +248,7 @@ public sealed class FakeWallet(OutgoingEvents events) : ISatoraWallet
         events.Add($"offboard quote {address} {amountSats?.ToString() ?? "all"}");
         if (OffboardQuoteError is not null)
             throw OffboardQuoteError;
-        return Task.FromResult(OffboardQuote);
+        return Task.FromResult(amountSats is { } sats ? new OffboardQuote(sats, OffboardQuote.FeeSats) : OffboardQuote);
     }
 
     public Task<string> OffboardAsync(string address, ulong? amountSats)
@@ -318,6 +335,9 @@ public sealed class MemoryWithdrawals(OutgoingEvents events, MemoryOutgoingSwaps
     public override Task<List<SatoraWithdrawal>> ListUnresolvedAsync(string storeId) =>
         Task.FromResult(Rows.Values.Where(w => w.StoreId == storeId && IsUnresolved(w)).Select(Copy).ToList());
 
+    public override Task<bool> HasOpenAsync(string storeId) =>
+        Task.FromResult(Rows.Values.Any(w => w.StoreId == storeId && w.Status is SatoraWithdrawalStatus.Pending or SatoraWithdrawalStatus.Unknown));
+
     public override async Task AttachSwapAsync(string withdrawalId, SatoraLightningSwap swap)
     {
         if (swaps is not null)
@@ -396,4 +416,123 @@ public sealed class MemoryWithdrawals(OutgoingEvents events, MemoryOutgoingSwaps
 
     public static SatoraWithdrawal Copy(SatoraWithdrawal withdrawal) =>
         JsonSerializer.Deserialize<SatoraWithdrawal>(JsonSerializer.Serialize(withdrawal))!;
+}
+
+public sealed class MemoryAutoWithdrawRules() : SatoraAutoWithdrawRules(null!)
+{
+    public Dictionary<string, SatoraAutoWithdrawRule> Rows { get; } = [];
+
+    public override Task<SatoraAutoWithdrawRule?> GetAsync(string storeId) =>
+        Task.FromResult(Rows.TryGetValue(storeId, out var rule) ? Copy(rule) : null);
+
+    public override Task<(bool Saved, SatoraAutoWithdrawRule? Previous)> SaveAsync(SatoraAutoWithdrawRule rule, int? expectedVersion, DateTimeOffset now)
+    {
+        var previous = Rows.GetValueOrDefault(rule.StoreId);
+        if (previous?.Version != expectedVersion)
+            return Task.FromResult<(bool, SatoraAutoWithdrawRule?)>((false, null));
+        var saved = Copy(rule);
+        (saved.Enabled, saved.Version, saved.UpdatedAt) = (true, (expectedVersion ?? 0) + 1, now);
+        Rows[rule.StoreId] = saved;
+        return Task.FromResult<(bool, SatoraAutoWithdrawRule?)>((true, previous));
+    }
+
+    public override Task<bool> DisableAsync(string storeId, DateTimeOffset now)
+    {
+        if (!Rows.TryGetValue(storeId, out var rule) || !rule.Enabled)
+            return Task.FromResult(false);
+        (rule.Enabled, rule.Version, rule.UpdatedAt) = (false, rule.Version + 1, now);
+        return Task.FromResult(true);
+    }
+
+    // An enabled rule as the withdrawals page saves it.
+    public SatoraAutoWithdrawRule Set(string storeId, SatoraWithdrawalType type, string destination, long thresholdSats, long reserveSats, int maxFeeBps = 100) =>
+        Rows[storeId] = new SatoraAutoWithdrawRule
+        {
+            StoreId = storeId,
+            Enabled = true,
+            DestinationType = type,
+            Destination = destination,
+            ThresholdSats = thresholdSats,
+            ReserveSats = reserveSats,
+            MaxFeeBps = maxFeeBps,
+            Version = 1
+        };
+
+    public static SatoraAutoWithdrawRule Copy(SatoraAutoWithdrawRule rule) =>
+        JsonSerializer.Deserialize<SatoraAutoWithdrawRule>(JsonSerializer.Serialize(rule))!;
+}
+
+// The withdrawal service on mainnet over the fakes above, with every Lightning address and LNURL
+// answered here and Unknown notifications recorded.
+public sealed class TestWithdrawalService(OutgoingEvents events, SatoraWalletAccess wallets, SatoraWithdrawals withdrawals,
+    SatoraAutoWithdrawRules rules, SatoraLightningPayments payments, SatoraWalletRenewals renewals, SatoraOutgoingSwaps outgoing,
+    ILogger<SatoraWithdrawalService>? logger = null)
+    : SatoraWithdrawalService(wallets, withdrawals, rules, payments, renewals, outgoing, null!, null!, null!, null!, null!, logger ?? NullLogger<SatoraWithdrawalService>.Instance)
+{
+    public List<string> Notified { get; } = [];
+
+    // The automatic withdrawal destinations the store was told of.
+    public List<string> DestinationsNotified { get; } = [];
+
+    public LNURLPayRequest PayRequest { get; } = new()
+    {
+        Callback = new Uri("https://example.com/lnurlp/alice/callback"),
+        MinSendable = LightMoney.Satoshis(1),
+        MaxSendable = LightMoney.Satoshis(1_000_000)
+    };
+
+    public string Invoice { get; set; } = SatoraLightningCreditTests.Bolt11;
+
+    // Answers each invoice request with an invoice for the amount asked, instead of Invoice.
+    public Func<long, string>? InvoiceFor { get; set; }
+
+    // Awaited by every Lightning address and LNURL lookup before it answers.
+    public Task PayRequestGate { get; set; } = Task.CompletedTask;
+
+    // Makes every pay request answer only once the lookup it is part of has timed out, as an endpoint
+    // whose answer arrives just as the timeout runs out.
+    public bool PayRequestAnswersAtTimeout { get; set; }
+
+    // Thrown by every Lightning address and LNURL lookup, as by an endpoint that cannot be reached.
+    public Exception? PayeeError { get; set; }
+
+    protected override TimeSpan LnurlTimeout => TimeSpan.FromMilliseconds(500);
+
+    protected override TimeSpan HeldReadTimeout => TimeSpan.FromMilliseconds(500);
+
+    public override string? Unavailable => null;
+
+    protected override Network Network => Network.Main;
+
+    protected override TimeSpan CloseWait => TimeSpan.FromMilliseconds(200);
+
+    public override Task<bool> HasAutomatedLightningPayoutsAsync(string storeId) => Task.FromResult(false);
+
+    protected override Task NotifyUnknownAsync(SatoraWithdrawal withdrawal)
+    {
+        Notified.Add(withdrawal.Id);
+        return Task.CompletedTask;
+    }
+
+    protected override Task NotifyDestinationChangedAsync(string storeId, string destination)
+    {
+        DestinationsNotified.Add(destination);
+        return Task.CompletedTask;
+    }
+
+    protected override async Task<LNURLPayRequest> FetchPayRequestAsync(Uri endpoint, CancellationToken cancellationToken)
+    {
+        events.Add($"lnurl {endpoint}");
+        await PayRequestGate.WaitAsync(cancellationToken);
+        if (PayRequestAnswersAtTimeout)
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        return PayeeError is null ? PayRequest : throw PayeeError;
+    }
+
+    protected override Task<string> RequestInvoiceAsync(LNURLPayRequest payRequest, LightMoney amount, Network network, CancellationToken cancellationToken)
+    {
+        events.Add($"lnurl invoice {amount.MilliSatoshi / 1000}");
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(InvoiceFor?.Invoke(amount.MilliSatoshi / 1000) ?? Invoice);
+    }
 }

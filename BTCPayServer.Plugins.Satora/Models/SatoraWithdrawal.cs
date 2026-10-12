@@ -2,14 +2,17 @@ using System.ComponentModel.DataAnnotations;
 
 namespace BTCPayServer.Plugins.Satora.Models;
 
-// One manual withdrawal attempt, written before any SDK call that could move funds.
+// One withdrawal attempt, written before any SDK call that could move funds.
 public class SatoraWithdrawal
 {
-    // The idempotency key the review page handed out: a second submit of the same review is refused.
+    // For a manual withdrawal, the idempotency key the review page handed out: a second submit of the
+    // same review is refused.
     [Key]
     public string Id { get; set; } = null!;
 
     public string StoreId { get; set; } = null!;
+
+    public SatoraWithdrawalOrigin Origin { get; set; }
 
     public SatoraWithdrawalType Type { get; set; }
 
@@ -42,6 +45,13 @@ public enum SatoraWithdrawalType
     LightningAddress,
     Lnurl,
     Bitcoin
+}
+
+public enum SatoraWithdrawalOrigin
+{
+    Manual,
+    // Started by the store's automatic withdrawal rule.
+    Auto
 }
 
 public enum SatoraWithdrawalStatus
