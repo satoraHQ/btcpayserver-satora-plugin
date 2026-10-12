@@ -25,3 +25,8 @@ public class SatoraConfirmBackupViewModel
 {
     public string? SeedConfirmation { get; set; }
 }
+
+public class SatoraUseAsLightningNodeViewModel
+{
+    public string? ReplaceConfirmation { get; set; }
+}

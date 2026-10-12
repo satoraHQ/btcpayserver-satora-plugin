@@ -100,6 +100,32 @@ namespace BTCPayServer.Plugins.Satora.Controllers
             return ShowSeed(storeId, mnemonic, requireConfirm: false);
         }
 
+        [HttpPost("rotate-lightning-key")]
+        public async Task<IActionResult> RotateLightningKey([FromRoute] string storeId)
+        {
+            if (!await CanUseHotWallet())
+                return NotFound();
+            if (await walletService.RotateLightningKeyAsync(storeId))
+                TempData[WellKnownTempData.SuccessMessage] = "Lightning connection key rotated. Copies of the old connection string no longer work.";
+            else
+                TempData[WellKnownTempData.ErrorMessage] = "The wallet has no Lightning connection key yet.";
+            return RedirectToAction(nameof(Index), new { storeId });
+        }
+
+        [HttpPost("use-as-lightning-node")]
+        public async Task<IActionResult> UseAsLightningNode([FromRoute] string storeId, SatoraUseAsLightningNodeViewModel vm)
+        {
+            if (!await CanUseHotWallet())
+                return NotFound();
+            if (!string.Equals(vm.ReplaceConfirmation?.Trim(), SeedWriteGuard.ConfirmationWord, StringComparison.Ordinal))
+                TempData[WellKnownTempData.ErrorMessage] = $"Type {SeedWriteGuard.ConfirmationWord} to replace the store's Lightning node.";
+            else if (await walletService.UseAsLightningNodeAsync(storeId))
+                TempData[WellKnownTempData.SuccessMessage] = "The Satora wallet is now the store's Lightning node. LNURL is turned off.";
+            else
+                TempData[WellKnownTempData.ErrorMessage] = "Enable the Satora wallet first.";
+            return RedirectToAction(nameof(Index), new { storeId });
+        }
+
         [HttpGet("wallet-balance")]
         public async Task<IActionResult> WalletBalance([FromRoute] string storeId)
         {
@@ -168,6 +194,7 @@ namespace BTCPayServer.Plugins.Satora.Controllers
         }
 
         private static string OpenOperations(string named) =>
-            "The wallet cannot be replaced while swaps that depend on it are open" + (named.Length > 0 ? $" ({named})" : "") + ".";
+            "The wallet cannot be replaced while swaps that depend on it are open" + (named.Length > 0 ? $" ({named})" : "") +
+            ". Disable the wallet so no new swaps start, and try again once these are finished.";
     }
 }

@@ -16,10 +16,18 @@ public class SatoraPluginDbContext : DbContext
     public DbSet<SatoraSettings> SatoraSettings { get; set; }
     public DbSet<SatoraTx> SatoraTransactions { get; set; }
     public DbSet<SatoraRetiredSeed> SatoraRetiredSeeds { get; set; }
+    public DbSet<SatoraLightningSwap> SatoraLightningSwaps { get; set; }
+    public DbSet<SatoraSentAlert> SatoraSentAlerts { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
         modelBuilder.HasDefaultSchema("BTCPayServer.Plugins.Satora");
+        modelBuilder.Entity<SatoraLightningSwap>(swap =>
+        {
+            swap.Property(s => s.Direction).HasConversion<string>();
+            swap.Property(s => s.Status).HasConversion<string>();
+        });
+        modelBuilder.Entity<SatoraSentAlert>().HasKey(a => new { a.StoreId, a.SwapId, a.Problem });
     }
 }
