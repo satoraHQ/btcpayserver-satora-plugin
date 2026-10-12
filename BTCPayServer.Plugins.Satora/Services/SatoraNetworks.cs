@@ -34,6 +34,15 @@ public static class SatoraNetworks
             NullIfEmpty(configuration[EsploraUrlKey]));
     }
 
+    // The SDK's own default for each network (Satora.Sdk Defaults.For, which it keeps internal).
+    public static string? DefaultEsploraUrl(SatoraBitcoinNetwork network) => network switch
+    {
+        SatoraBitcoinNetwork.Mainnet => "https://mempool.space/api",
+        SatoraBitcoinNetwork.Signet => "https://mutinynet.com/api",
+        SatoraBitcoinNetwork.Regtest => "http://localhost:3000/api",
+        _ => null
+    };
+
     public static bool HasEndpointOverrides(IConfiguration configuration) =>
         new[] { BaseUrlKey, ArkadeServerUrlKey, EsploraUrlKey }.Any(key => NullIfEmpty(configuration[key]) is not null);
 

@@ -2,6 +2,8 @@ using System.Runtime.CompilerServices;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Models;
 using BTCPayServer.Lightning;
+using BTCPayServer.Payments;
+using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Services;
@@ -21,6 +23,7 @@ public class Plugin : BaseBTCPayServerPlugin
     {
         // The old stablecoin checkout extensions and SatoraSwapWatcher are not registered; see SatoraSwapController.
         services.AddUIExtension("store-wallets-nav", "SatoraPluginHeaderNav")
+                .AddUIExtension("layout-banner", "SatoraPaymentMethodNames")
                 .AddSingleton<SatoraPluginDbContextFactory>()
                 .AddHostedService<PluginMigrationRunner>()
                 .AddSingleton<SatoraSeedProtector>()
@@ -49,8 +52,26 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddHostedService<SatoraOutgoingWorker>()
                 .AddSingleton<INotificationHandler, SatoraLightningNotification.Handler>()
                 .AddSingleton<INotificationHandler, SatoraWithdrawalNotification.Handler>()
+                .AddSingleton<SatoraChainSwaps>()
+                .AddSingleton<SatoraChainWallets>()
+                .AddSingleton<SatoraChainCredit>()
+                .AddSingleton<SatoraStoreChainConfig>()
+                // Registered as BTCPay registers its own BTC-CHAIN and BTC-LN methods (AddBTCPayNetwork).
+                .AddDefaultPrettyName(SatoraChainPaymentMethod.Id, SatoraChainPaymentMethod.PrettyName)
+                .AddSingleton(s => ActivatorUtilities.CreateInstance<SatoraChainPaymentHandler>(s, BitcoinNetwork(s)))
+                .AddSingleton<IPaymentMethodHandler>(s => s.GetRequiredService<SatoraChainPaymentHandler>())
+                .AddSingleton<IPaymentLinkExtension>(s => ActivatorUtilities.CreateInstance<SatoraChainPaymentLinkExtension>(s, BitcoinNetwork(s)))
+                .AddSingleton<ICheckoutModelExtension>(s => ActivatorUtilities.CreateInstance<SatoraChainCheckoutModelExtension>(s, BitcoinNetwork(s)))
+                .AddUIExtension("checkout-end", "SatoraChain/SatoraChainMethodCheckout")
+                .AddUIExtension("store-invoices-payments", "SatoraChain/ViewSatoraChainPaymentData")
+                .AddHostedService<SatoraChainWorker>()
+                .AddHostedService<SatoraChainPromptRenewer>()
+                .AddSingleton<INotificationHandler, SatoraChainNotification.Handler>()
                 .AddSingleton<SatoraSettlementService>()
                 .AddSingleton<SatoraService>()
                 .AddSingleton<SatoraPluginService>();
     }
+
+    private static BTCPayNetwork BitcoinNetwork(IServiceProvider services) =>
+        services.GetRequiredService<BTCPayNetworkProvider>().GetNetwork<BTCPayNetwork>(SatoraChainPaymentMethod.CryptoCode);
 }

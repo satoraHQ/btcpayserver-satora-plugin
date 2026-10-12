@@ -1,8 +1,12 @@
 using System.Collections.Concurrent;
+using BTCPayServer.Events;
 using BTCPayServer.Lightning;
+using BTCPayServer.Logging;
+using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Plugins.Satora.Services;
+using BTCPayServer.Services.Invoices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -267,6 +271,33 @@ public class SatoraLightningIntegrationTests(SatoraWalletIntegrationTests.Databa
         ExpiresAt = cutoff ?? Now.AddMinutes(25),
         CreatedAt = createdAt ?? Now
     };
+}
+
+// How SatoraLightningCredit finds an incoming swap's invoice in BTCPay's own database, opt-in as above.
+public class SatoraLightningInvoiceIntegrationTests(SatoraChainPromptIntegrationTests.BtcPayDatabase btcpay)
+    : IClassFixture<SatoraChainPromptIntegrationTests.BtcPayDatabase>
+{
+    private const string NeedsPostgres = "Set SATORA_TEST_POSTGRES to run";
+
+    public static bool HasPostgres => SatoraWalletIntegrationTests.HasPostgres;
+
+    // LightningLikePaymentHandler tracks each prompt's payment hash under BTC-LN; the same string
+    // tracked for another method is not a Lightning swap's.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task FindsTheInvoiceTrackingEachPaymentHash()
+    {
+        var invoices = new InvoiceRepository(btcpay.Contexts, new EventAggregator(new Logs()));
+        var invoiceId = await btcpay.AddInvoiceAsync("lightning");
+        var tracked = new string('a', 64);
+        var otherMethod = new string('b', 64);
+        await invoices.AddAddressInvoice(invoiceId, SatoraLightningCredit.PaymentMethodId, tracked);
+        await invoices.AddAddressInvoice(invoiceId, SatoraChainPaymentMethod.Id, otherMethod);
+        var credit = new SatoraLightningCredit(invoices, null!, null!, null!, btcpay.Contexts, NullLogger<SatoraLightningCredit>.Instance);
+
+        var found = await credit.FindInvoiceIdsAsync([tracked, otherMethod, new string('c', 64), "not-a-payment-hash"]);
+
+        Assert.Equal([(tracked, invoiceId)], found.Select(f => (f.Key, f.Value)));
+    }
 }
 
 // The invoices BTCPay's own database would find for incoming Lightning swaps, by payment hash.

@@ -21,10 +21,6 @@ public enum SatoraOutgoingAction
 
 public static class SatoraOutgoingActions
 {
-    // Median time past trails the clock by about an hour, often more, and the SDK refuses a refund
-    // without the swap server until it has passed the VHTLC's refund locktime.
-    public static readonly TimeSpan MedianTimeLag = TimeSpan.FromHours(2);
-
     // The statuses in which the swap server cosigns a refund (can_sign_client_collab_refund): it will
     // not pay the invoice any more.
     public static bool IsRefundState(SatoraSwapStatus status) => status is

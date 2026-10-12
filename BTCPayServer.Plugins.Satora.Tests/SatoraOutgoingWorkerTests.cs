@@ -1,6 +1,7 @@
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Configuration;
 using BTCPayServer.Lightning;
+using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Plugins.Satora.Services;
@@ -767,7 +768,7 @@ public class SatoraOutgoingWorkerTests
     [Fact]
     public async Task ARefundWithoutTheServerRefusedAsNotMatureIsExpectedWithinTheMedianTimeLag()
     {
-        _worker.Now = FakeWallet.Locktime.AddMinutes(-1) + SatoraOutgoingActions.MedianTimeLag;
+        _worker.Now = FakeWallet.Locktime.AddMinutes(-1) + SatoraChainActions.MedianTimeLag;
         Open("swap", null, fundingAttempted: true, fundingTxId: "ark-swap");
         _wallet.NotFound.Add("swap");
         _wallet.RefundErrors[SdkArkadeSpend.Refund] = new SdkException(SdkErrorKind.InvalidSwap, NotMature);
@@ -786,7 +787,7 @@ public class SatoraOutgoingWorkerTests
     [Fact]
     public async Task SaysTheFundsAreStillInTheVhtlcWhenTheRefundStaysNotMaturePastTheMedianTimeLag()
     {
-        _worker.Now = FakeWallet.Locktime + SatoraOutgoingActions.MedianTimeLag;
+        _worker.Now = FakeWallet.Locktime + SatoraChainActions.MedianTimeLag;
         Open("swap", new SdkSwapStatus.ServerFunded(), fundingAttempted: true, fundingTxId: "ark-swap");
         _wallet.RefundErrors[SdkArkadeSpend.Refund] = new SdkException(SdkErrorKind.InvalidSwap, NotMature);
         _wallet.Amounts = new VhtlcAmounts(12_400, 0, 0, []);

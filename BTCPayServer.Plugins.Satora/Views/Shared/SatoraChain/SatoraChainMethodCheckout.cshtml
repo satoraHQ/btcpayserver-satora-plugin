@@ -1,0 +1,42 @@
+@using BTCPayServer.Abstractions.Services
+@using BTCPayServer.Plugins.Satora.Chain
+@inject Safe Safe
+@model BTCPayServer.Models.InvoicingModels.CheckoutModel
+
+@* Shaped after BTCPay's Bitcoin/BitcoinLikeMethodCheckout.cshtml. *@
+<template id="@SatoraChainCheckoutModelExtension.CheckoutBodyComponentName">
+    <div class="payment-box">
+        <div v-if="model.invoiceBitcoinUrlQR" class="qr-container clipboard-button" :data-qr-value="model.invoiceBitcoinUrlQR" :data-clipboard="model.invoiceBitcoinUrl" data-clipboard-confirm-element="#SatoraChainAddress [data-clipboard]">
+            <div>
+                <qrcode :value="model.invoiceBitcoinUrlQR" tag="div" :options="qrOptions" />
+            </div>
+            <img class="qr-icon" :src="model.cryptoImage" :alt="model.paymentMethodName"/>
+        </div>
+        <div v-if="model.address" class="input-group mt-3">
+            <div class="form-floating" id="SatoraChainAddress">
+                <vc:truncate-center text="model.address" is-vue="true" padding="15" elastic="true" classes="form-control-plaintext" />
+                <label v-t="{ path: 'address', args: { paymentMethod: model.paymentMethodName }}"></label>
+            </div>
+        </div>
+        <div v-if="model.address" class="input-group mt-3">
+            <div class="form-floating" id="SatoraChainAmount">
+                <div class="form-control-plaintext clipboard-button" :data-clipboard="model.due" v-text="`${model.due} ${model.paymentMethodCurrency}`"></div>
+                <label>Amount</label>
+            </div>
+        </div>
+        <p v-if="model.address" class="text-secondary small mt-3 mb-0">Send exactly this amount in a single transaction. The payment completes after one confirmation.</p>
+        <p v-else class="text-secondary small mt-3 mb-0">A new address for the amount due is on its way. Reload the page in a moment, or pick another payment method.</p>
+        <a v-if="model.invoiceBitcoinUrl && model.showPayInWalletButton" class="btn btn-primary rounded-pill w-100 mt-4" id="PayInWallet" target="_blank"
+           :href="model.invoiceBitcoinUrl" v-t="'pay_in_wallet'"></a>
+    </div>
+</template>
+
+<script>
+    Vue.component(@Safe.Json(SatoraChainCheckoutModelExtension.CheckoutBodyComponentName), {
+        props: ['model', 'nfcSupported', 'nfcScanning', 'nfcErrorMessage', 'nfcWarningMessage'],
+        template: @Safe.Json("#" + SatoraChainCheckoutModelExtension.CheckoutBodyComponentName),
+        components: {
+            qrcode: VueQrcode
+        }
+    });
+</script>

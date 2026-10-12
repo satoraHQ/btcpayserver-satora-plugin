@@ -27,6 +27,7 @@ public class SatoraPluginControllerTests
 {
     private static readonly MethodInfo[] Posts = typeof(SatoraPluginController).GetMethods()
         .Concat(typeof(SatoraWithdrawController).GetMethods())
+        .Concat(typeof(SatoraChainRefundController).GetMethods())
         .Where(m => m.GetCustomAttributes<HttpPostAttribute>().Any())
         .ToArray();
 
@@ -55,13 +56,13 @@ public class SatoraPluginControllerTests
         }
     }
 
-    // Withdrawing from an existing wallet needs no hot wallet rights, but BTCPay must check the store
-    // settings permission on the route's store before any withdrawal action runs.
-    [Fact]
-    public void WithdrawalsNeedTheStoreSettingsPermissionAndAnAntiforgeryToken()
+    // Withdrawing from an existing wallet, or refunding a customer, needs no hot wallet rights, but BTCPay
+    // must check the store settings permission on the route's store before any such action runs.
+    [Theory]
+    [InlineData(typeof(SatoraWithdrawController))]
+    [InlineData(typeof(SatoraChainRefundController))]
+    public void WithdrawalsNeedTheStoreSettingsPermissionAndAnAntiforgeryToken(Type controller)
     {
-        var controller = typeof(SatoraWithdrawController);
-
         Assert.Equal([Policies.CanModifyStoreSettings], controller.GetCustomAttributes<AuthorizeAttribute>().Select(a => a.Policy));
         Assert.NotNull(controller.GetCustomAttribute<AutoValidateAntiforgeryTokenAttribute>());
         Assert.All(controller.GetMethods(), action =>
@@ -160,7 +161,7 @@ public class SatoraPluginControllerTests
     }
 
     // A wallet whose seed cannot be read, so ViewSeed redirects back to the settings page.
-    private sealed class RecordingWalletService() : SatoraWalletService(null!, null!, null!, null!, null!, NullLogger<SatoraWalletService>.Instance)
+    private sealed class RecordingWalletService() : SatoraWalletService(null!, null!, null!, null!, null!, null!, NullLogger<SatoraWalletService>.Instance)
     {
         public List<string> StatusReads { get; } = [];
 

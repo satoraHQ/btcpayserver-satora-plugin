@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Runtime.Versioning;
 using BTCPayServer.Plugins.Satora.Services;
 using Microsoft.Extensions.Configuration;
@@ -19,6 +20,20 @@ public class SatoraNetworksTests
     public void MapsBtcpayNetworksToSdkNetworks(string btcpayNetwork, SatoraBitcoinNetwork expected)
     {
         Assert.Equal(expected, SatoraNetworks.FromChain(Network.GetNetwork(btcpayNetwork)!.ChainName));
+    }
+
+    // Esplora reads go where the SDK's own client reads, which keeps its defaults internal.
+    [Theory]
+    [InlineData(SatoraBitcoinNetwork.Mainnet)]
+    [InlineData(SatoraBitcoinNetwork.Signet)]
+    [InlineData(SatoraBitcoinNetwork.Regtest)]
+    [InlineData(SatoraBitcoinNetwork.Testnet)]
+    public void DefaultsToTheSdksEsplora(SatoraBitcoinNetwork network)
+    {
+        var defaults = typeof(global::Satora.Sdk.Client).Assembly.GetType("Satora.Sdk.Defaults", throwOnError: true)!;
+        var endpoints = defaults.GetMethod("For", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [network]);
+
+        Assert.Equal(endpoints?.GetType().GetProperty("EsploraUrl")!.GetValue(endpoints), SatoraNetworks.DefaultEsploraUrl(network));
     }
 
     [Fact]

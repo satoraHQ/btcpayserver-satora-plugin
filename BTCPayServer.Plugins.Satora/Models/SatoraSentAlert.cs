@@ -8,7 +8,7 @@ public class SatoraSentAlert
     // The swap the alert is about; empty for one about the store.
     public string SwapId { get; set; } = null!;
 
-    // The worker, the problem and the status the alert is for, if any: "lightning/UnexpectedStatus/Expired".
+    // The worker, the problem and the status the alert is for, if any: "chain/UnexpectedStatus/Expired".
     public string Problem { get; set; } = null!;
 
     public DateTimeOffset SentAt { get; set; }

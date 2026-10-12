@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Plugins.Satora.Services;
 using Satora.Sdk;
@@ -368,7 +369,7 @@ public class SatoraOutgoingWorker(
         }
         catch (Exception e) when (!stoppingToken.IsCancellationRequested && SatoraOutgoingActions.IsRefundLocktimeNotMature(e))
         {
-            if (UtcNow < swap.ClaimCutoff + SatoraOutgoingActions.MedianTimeLag)
+            if (UtcNow < swap.ClaimCutoff + SatoraChainActions.MedianTimeLag)
             {
                 logger.LogDebug(e, "Outgoing Satora Lightning swap {SwapId} of store {StoreId} cannot be refunded without the swap server yet; retrying", swap.SwapId, swap.StoreId);
                 return;
