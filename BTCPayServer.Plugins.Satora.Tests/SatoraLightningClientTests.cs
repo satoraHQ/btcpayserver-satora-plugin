@@ -40,7 +40,7 @@ public class SatoraLightningClientTests : IDisposable
             Options.Create(new DataDirectories { DataDir = _dataDir }), NullLogger<SatoraWalletRegistry>.Instance);
         _registry.SetLightningKey("store", Key);
         _handler = new SatoraLightningConnectionStringHandler(_registry, null!, new SatoraLightningInvoiceHub(),
-            new SatoraClaimWindow(SatoraBitcoinNetwork.Regtest), NullLogger<SatoraLightningClient>.Instance);
+            new SatoraClaimWindow(SatoraBitcoinNetwork.Regtest), null!, NullLogger<SatoraLightningClient>.Instance);
     }
 
     public void Dispose()
@@ -132,16 +132,15 @@ public class SatoraLightningClientTests : IDisposable
         Assert.Contains("20 minutes", tooLong.Message);
     }
 
+    // The registry, wallet and swap table are all null: a refusal that reached them would throw something else.
     [Fact]
-    public async Task PaysNothingAndReportsNoPayments()
+    public async Task RefusesWhatItCannotPayBeforeTouchingTheWallet()
     {
         var client = Offline(SatoraBitcoinNetwork.Mainnet);
 
         Assert.Equal(PayResult.Error, (await client.Pay("lnbc1", Ct)).Result);
         Assert.Equal(PayResult.Error, (await client.Pay("lnbc1", new PayInvoiceParams(), Ct)).Result);
-        Assert.Equal(PayResult.Error, (await client.Pay(new PayInvoiceParams(), Ct)).Result);
-        Assert.Null(await client.GetPayment(new string('a', 64), Ct));
-        Assert.Empty(await client.ListPayments(Ct));
+        Assert.Equal(PayResult.Error, (await client.Pay(new PayInvoiceParams { PaymentHash = new uint256(1) }, Ct)).Result);
     }
 
     // LightningLikePaymentHandler.GetNodeInfo treats NotSupportedException as "no node info" and skips the
@@ -230,5 +229,5 @@ public class SatoraLightningClientTests : IDisposable
 
     private static SatoraLightningClient Offline(SatoraBitcoinNetwork network) => new(
         "store", Key, Network.Main, null!, null!, new SatoraLightningInvoiceHub(), new SatoraClaimWindow(network),
-        NullLogger<SatoraLightningClient>.Instance);
+        new SatoraLightningPayments(null!, null!, null!, NullLogger<SatoraLightningPayments>.Instance), NullLogger<SatoraLightningClient>.Instance);
 }

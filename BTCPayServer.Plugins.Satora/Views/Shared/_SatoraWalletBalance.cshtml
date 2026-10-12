@@ -1,0 +1,39 @@
+@model string
+
+<div id="SatoraWalletBalance" class="widget store-wallet-balance mb-4" data-url="@Url.Action("WalletBalance", "SatoraPlugin", new { storeId = Model })">
+    <h6 class="mb-2">Satora wallet balance</h6>
+    <div class="text-secondary" data-balance-status>Loading</div>
+    <div class="balances d-flex flex-wrap gap-4 d-none" data-balance-values>
+        <div class="balance">
+            <h3 class="d-inline-block me-1" data-balance="confirmedSats" data-sensitive></h3>
+            <span class="text-secondary fw-semibold text-nowrap">BTC confirmed</span>
+        </div>
+        <div class="balance">
+            <h3 class="d-inline-block me-1" data-balance="preConfirmedSats" data-sensitive></h3>
+            <span class="text-secondary text-nowrap">BTC pre-confirmed</span>
+        </div>
+        <div class="balance">
+            <h3 class="d-inline-block me-1" data-balance="recoverableSats" data-sensitive></h3>
+            <span class="text-secondary text-nowrap">BTC recoverable</span>
+        </div>
+    </div>
+</div>
+<script>
+    (function () {
+        const widget = document.getElementById('SatoraWalletBalance');
+        const status = widget.querySelector('[data-balance-status]');
+        const btc = sats => `${Math.floor(sats / 1e8)}.${String(sats % 1e8).padStart(8, '0')}`;
+        fetch(widget.dataset.url, { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+            .then(response => { if (!response.ok) throw new Error(response.statusText); return response.json(); })
+            .then(balance => {
+                for (const key of ['confirmedSats', 'preConfirmedSats', 'recoverableSats'])
+                    widget.querySelector(`[data-balance="${key}"]`).textContent = btc(balance[key]);
+                status.classList.add('d-none');
+                widget.querySelector('[data-balance-values]').classList.remove('d-none');
+                const recoverable = balance.canSettle ? 'settle' : balance.recoverableSats > 0 ? 'dust' : null;
+                for (const element of document.querySelectorAll('[data-satora-recoverable]'))
+                    element.classList.toggle('d-none', element.dataset.satoraRecoverable !== recoverable);
+            })
+            .catch(() => { status.textContent = 'The wallet balance could not be read. Check that the Arkade server is reachable.'; });
+    })();
+</script>

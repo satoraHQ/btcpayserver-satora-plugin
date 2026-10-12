@@ -244,7 +244,7 @@ public class SatoraLightningWorker(
                 swap.DoNotClaim = true;
                 return false;
             }
-            var txid = await wallets.ClaimAsync(swap.StoreId, swap.SwapId, destination) switch
+            var txid = await wallets.ClaimAsync(swap.StoreId, swap.SwapId, destination, cancellationToken) switch
             {
                 SdkArkadeSettlement.Offchain offchain => offchain.arkTxid,
                 SdkArkadeSettlement.Delegated delegated => delegated.commitmentTxid,

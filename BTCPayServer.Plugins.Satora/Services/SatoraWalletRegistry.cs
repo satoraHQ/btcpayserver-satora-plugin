@@ -81,20 +81,22 @@ public sealed class SatoraWalletRegistry : IHostedService, IDisposable
         return status;
     }
 
-    // For reads (balance, address). A replace may retire the wallet right after it is returned, so
-    // swaps are created and funds spent through UseAsync.
-    public async Task<StoreWallet> GetAsync(string storeId)
+    // For reads (balance, address, statuses). A replace may retire the wallet right after it is
+    // returned, so swaps are created, and their VHTLCs claimed and refunded, through UseAsync, and the
+    // wallet's own funds spent through SpendAsync. cancellationToken stops only the wait for a replace
+    // or eviction, or for the client to be built.
+    public async Task<StoreWallet> GetAsync(string storeId, CancellationToken cancellationToken = default)
     {
         while (true)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_exclusive.TryGetValue(storeId, out var exclusive))
             {
-                await exclusive.Task;
+                await exclusive.Task.WaitAsync(cancellationToken);
                 continue;
             }
             var entry = _wallets.GetOrAdd(storeId, NewEntry);
-            var wallet = await GetOrRemoveAsync(storeId, entry);
+            var wallet = await GetOrRemoveAsync(storeId, entry).WaitAsync(cancellationToken);
             ObjectDisposedException.ThrowIf(_disposed, this);
             // A replace or eviction that started while the client was being built decides without this caller.
             if (!wallet.Retired && !_exclusive.ContainsKey(storeId))
@@ -102,33 +104,52 @@ public sealed class SatoraWalletRegistry : IHostedService, IDisposable
         }
     }
 
-    // Lets a test start a replace after GetAsync has handed UseAsync a wallet and before UseAsync takes its SpendLock.
-    internal Func<Task>? BeforeSpendLock { get; set; }
+    // Lets a test start a replace after GetAsync has handed UseAsync a wallet and before UseAsync enters it.
+    internal Func<Task>? BeforeUse { get; set; }
 
-    // Runs action with the store's current wallet and its SpendLock held: a replace or eviction counts
-    // open swaps only before action starts or after it returns, and action never gets a wallet one of
-    // them retired. action writes the rows CountOpenOperationsAsync counts before it returns. It does
-    // not call GetAsync or UseAsync for the same store, nor any SatoraWalletService write method, each
-    // of which would wait for a replace or eviction that is waiting for action.
-    public async Task<T> UseAsync<T>(string storeId, Func<StoreWallet, Task<T>> action)
+    // Runs action with the store's current wallet, which no replace or eviction retires before action
+    // returns: they wait for every action in flight, and an action starting meanwhile waits for them,
+    // so what they count cannot change under them. action writes the rows CountOpenOperationsAsync
+    // counts before it returns. It does not call GetAsync, UseAsync or SpendAsync for the same store,
+    // nor any SatoraWalletService write method, each of which would wait for a replace or eviction
+    // that is waiting for action. cancellationToken stops only the wait before action starts, so
+    // BTCPay's invoice timeout still gets an answer while a replace waits for a long withdrawal.
+    public async Task<T> UseAsync<T>(string storeId, Func<StoreWallet, Task<T>> action, CancellationToken cancellationToken = default)
     {
         while (true)
         {
-            var wallet = await GetAsync(storeId);
-            if (BeforeSpendLock is { } beforeSpendLock)
-                await beforeSpendLock();
-            await wallet.SpendLock.WaitAsync();
+            var wallet = await GetAsync(storeId, cancellationToken);
+            if (BeforeUse is { } beforeUse)
+                await beforeUse();
+            if (!wallet.TryEnter())
+                continue;
             try
             {
-                if (!wallet.Retired)
-                    return await action(wallet);
+                return await action(wallet);
+            }
+            finally
+            {
+                wallet.Exit();
+            }
+        }
+    }
+
+    // UseAsync with the store's spend lock held as well: withdrawals, payments and fundings never
+    // overlap, while swap creation (UseAsync alone) does not wait for them. cancellationToken stops
+    // only the waits before action starts.
+    public Task<T> SpendAsync<T>(string storeId, Func<StoreWallet, Task<T>> action, CancellationToken cancellationToken = default) =>
+        UseAsync(storeId, async wallet =>
+        {
+            await wallet.SpendLock.WaitAsync(cancellationToken);
+            try
+            {
+                return await action(wallet);
             }
             finally
             {
                 wallet.SpendLock.Release();
             }
-        }
-    }
+        }, cancellationToken);
 
     // Builds the client and connects to arkd in the background, so the first payment request does not wait for it.
     public void Warm(string storeId)
@@ -163,10 +184,10 @@ public sealed class SatoraWalletRegistry : IHostedService, IDisposable
     public Task EvictAsync(string storeId, Func<Task<bool>> canEvict) =>
         ExclusiveAsync(storeId, build: false, async wallet => (true, wallet is not null && await canEvict()));
 
-    // GetAsync and UseAsync wait while body runs, and body starts only once a UseAsync action holding
-    // the wallet's SpendLock has returned, so whatever body counts cannot change under it. A wallet
-    // body retires is disposed and dropped before GetAsync can hand it out again. body must not call
-    // GetAsync or UseAsync for the store.
+    // GetAsync and UseAsync wait while body runs, and body starts only once every UseAsync action in
+    // flight has returned, so whatever body counts cannot change under it. A wallet body retires is
+    // disposed and dropped before GetAsync can hand it out again. body must not call GetAsync or
+    // UseAsync for the store.
     private async Task<T> ExclusiveAsync<T>(string storeId, bool build, Func<StoreWallet?, Task<(T Result, bool Retire)>> body)
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -192,7 +213,8 @@ public sealed class SatoraWalletRegistry : IHostedService, IDisposable
             }
             if (wallet is null)
                 return (await body(null)).Result;
-            await wallet.SpendLock.WaitAsync();
+            await wallet.CloseAsync();
+            var retired = false;
             try
             {
                 var (result, retire) = await body(wallet);
@@ -200,12 +222,14 @@ public sealed class SatoraWalletRegistry : IHostedService, IDisposable
                 {
                     _wallets.TryRemove(KeyValuePair.Create(storeId, entry!));
                     wallet.Retire();
+                    retired = true;
                 }
                 return result;
             }
             finally
             {
-                wallet.SpendLock.Release();
+                if (!retired)
+                    wallet.Reopen();
             }
         }
         finally
@@ -366,6 +390,13 @@ public sealed class StoreWallet : IDisposable
     private string? _arkadeAddress;
     private volatile bool _retired;
 
+    // UseAsync actions in flight, and whether a replace or eviction has stopped new ones while it
+    // decides. A retired wallet stays closed.
+    private readonly object _uses = new();
+    private int _inFlight;
+    private bool _closed;
+    private TaskCompletionSource? _drained;
+
     internal StoreWallet(string storeId, SdkClient client)
     {
         StoreId = storeId;
@@ -376,10 +407,52 @@ public sealed class StoreWallet : IDisposable
 
     public SdkClient Client { get; }
 
-    // Held by UseAsync actions, and by a replace or eviction while it decides.
+    // Held by SpendAsync actions.
     internal SemaphoreSlim SpendLock { get; } = new(1, 1);
 
     internal bool Retired => _retired;
+
+    internal bool TryEnter()
+    {
+        lock (_uses)
+        {
+            if (_closed)
+                return false;
+            _inFlight++;
+            return true;
+        }
+    }
+
+    internal void Exit()
+    {
+        lock (_uses)
+        {
+            if (--_inFlight == 0)
+                _drained?.TrySetResult();
+        }
+    }
+
+    // Stops new actions and completes once those in flight have returned.
+    internal Task CloseAsync()
+    {
+        lock (_uses)
+        {
+            _closed = true;
+            if (_inFlight == 0)
+                return Task.CompletedTask;
+            _drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            return _drained.Task;
+        }
+    }
+
+    internal void Reopen()
+    {
+        lock (_uses)
+        {
+            _closed = false;
+            _drained = null;
+        }
+    }
 
     public async Task<string> GetArkadeAddressAsync(CancellationToken cancellationToken = default) =>
         _arkadeAddress ??= await Client.GetArkadeAddressAsync(cancellationToken);

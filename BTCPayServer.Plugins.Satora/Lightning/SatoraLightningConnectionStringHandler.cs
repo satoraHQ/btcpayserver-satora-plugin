@@ -46,6 +46,7 @@ public class SatoraLightningConnectionStringHandler(
     SatoraLightningSwaps swaps,
     SatoraLightningInvoiceHub invoiceHub,
     SatoraClaimWindow claimWindow,
+    SatoraLightningPayments payments,
     ILogger<SatoraLightningClient> logger) : ILightningConnectionStringHandler
 {
     public ILightningClient? Create(string connectionString, Network network, out string? error)
@@ -63,7 +64,7 @@ public class SatoraLightningConnectionStringHandler(
             error = "This Satora connection string is not valid for any store wallet.";
             return null;
         }
-        return new SatoraLightningClient(storeId, key, network, registry, swaps, invoiceHub, claimWindow, logger);
+        return new SatoraLightningClient(storeId, key, network, registry, swaps, invoiceHub, claimWindow, payments, logger);
     }
 
     // A store could set the string as an altcoin's Lightning node, and altcoin networks share chain names with Bitcoin.

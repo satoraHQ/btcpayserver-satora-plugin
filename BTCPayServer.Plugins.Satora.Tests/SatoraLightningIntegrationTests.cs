@@ -71,7 +71,8 @@ public class SatoraLightningIntegrationTests(SatoraWalletIntegrationTests.Databa
         Assert.False((await Swaps.FindAsync("cancel", credited.SwapId, Ct))!.DoNotClaim);
     }
 
-    // BTCPay's invoice search knows an invoice's id but no swap id.
+    // BTCPay's invoice search knows an invoice's id but no swap id, and a payment out of the wallet pays
+    // no invoice of the store's.
     [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
     public async Task AReplaceRefusalNamesIncomingLightningSwapsByTheirInvoice()
     {
@@ -79,13 +80,14 @@ public class SatoraLightningIntegrationTests(SatoraWalletIntegrationTests.Databa
         var first = Swap("name-ln", new string('1', 64));
         var renewed = Swap("name-ln", new string('2', 64), createdAt: Now.AddSeconds(1));
         var untracked = Swap("name-ln", new string('3', 64), createdAt: Now.AddSeconds(2));
-        foreach (var swap in new[] { first, renewed, untracked })
+        var payment = Swap("name-ln", new string('4', 64), SatoraLightningDirection.ArkadeToLightning, createdAt: Now.AddSeconds(3));
+        foreach (var swap in new[] { first, renewed, untracked, payment })
             await Swaps.AddAsync(swap);
         db.LightningInvoices.ByPaymentHash[first.PaymentHash] = "invoice-1";
         db.LightningInvoices.ByPaymentHash[renewed.PaymentHash] = "invoice-1";
 
         Assert.Equal(
-            $"Lightning swaps of invoices: invoice-1; Lightning swaps BTCPay has no invoice for: {untracked.SwapId}",
+            $"Lightning swaps of invoices: invoice-1; Lightning swaps BTCPay has no invoice for: {untracked.SwapId}; Lightning payments: {payment.SwapId}",
             await wallets.DescribeOpenOperationsAsync("name-ln"));
     }
 
@@ -95,7 +97,7 @@ public class SatoraLightningIntegrationTests(SatoraWalletIntegrationTests.Databa
     public async Task AClaimAndACancelOfTheSameSwapExcludeEachOther()
     {
         var logs = new RecordingLogger<SatoraLightningClient>();
-        var client = new SatoraLightningClient("race", "key", Network.RegTest, null!, Swaps, new SatoraLightningInvoiceHub(), null!, logs);
+        var client = new SatoraLightningClient("race", "key", Network.RegTest, null!, Swaps, new SatoraLightningInvoiceHub(), null!, null!, logs);
         var claimed = Swap("race", "claimed");
         var cancelled = Swap("race", "cancelled");
         await Swaps.AddAsync(claimed);
@@ -209,17 +211,17 @@ public class SatoraLightningIntegrationTests(SatoraWalletIntegrationTests.Databa
         await ReadyAndEnabled(wallets, "recheck");
         var key = (await db.Settings("recheck")).LightningConnectionKey!;
         var client = new SatoraLightningClient("recheck", key, Network.RegTest, registry, Swaps, new SatoraLightningInvoiceHub(),
-            new SatoraClaimWindow(registry.Network), NullLogger<SatoraLightningClient>.Instance);
-        registry.BeforeSpendLock = async () =>
+            new SatoraClaimWindow(registry.Network), null!, NullLogger<SatoraLightningClient>.Instance);
+        registry.BeforeUse = async () =>
         {
-            registry.BeforeSpendLock = null;
+            registry.BeforeUse = null;
             Assert.True(await wallets.RotateLightningKeyAsync("recheck"));
         };
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
             client.CreateInvoice(new CreateInvoiceParams(LightMoney.Satoshis(1000), "order", TimeSpan.FromMinutes(15)), Ct));
 
-        Assert.Null(registry.BeforeSpendLock);
+        Assert.Null(registry.BeforeUse);
         Assert.Empty(await Swaps.ListOpenAsync("recheck", Ct));
     }
 

@@ -1,6 +1,8 @@
 using System.Reflection;
 using System.Security.Claims;
+using System.Text.Json;
 using BTCPayServer.Abstractions.Constants;
+using BTCPayServer.Client;
 using BTCPayServer.Plugins.Satora.Controllers;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Plugins.Satora.Services;
@@ -17,12 +19,14 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using Xunit;
+using ArkadeBalance = uniffi.satora_sdk_ffi.ArkadeBalance;
 
 namespace BTCPayServer.Plugins.Satora.Tests;
 
 public class SatoraPluginControllerTests
 {
     private static readonly MethodInfo[] Posts = typeof(SatoraPluginController).GetMethods()
+        .Concat(typeof(SatoraWithdrawController).GetMethods())
         .Where(m => m.GetCustomAttributes<HttpPostAttribute>().Any())
         .ToArray();
 
@@ -49,6 +53,22 @@ public class SatoraPluginControllerTests
                 Assert.Null(model.GetProperty("StoreId", BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase));
             }
         }
+    }
+
+    // Withdrawing from an existing wallet needs no hot wallet rights, but BTCPay must check the store
+    // settings permission on the route's store before any withdrawal action runs.
+    [Fact]
+    public void WithdrawalsNeedTheStoreSettingsPermissionAndAnAntiforgeryToken()
+    {
+        var controller = typeof(SatoraWithdrawController);
+
+        Assert.Equal([Policies.CanModifyStoreSettings], controller.GetCustomAttributes<AuthorizeAttribute>().Select(a => a.Policy));
+        Assert.NotNull(controller.GetCustomAttribute<AutoValidateAntiforgeryTokenAttribute>());
+        Assert.All(controller.GetMethods(), action =>
+        {
+            Assert.Null(action.GetCustomAttribute<AllowAnonymousAttribute>());
+            Assert.Null(action.GetCustomAttribute<IgnoreAntiforgeryTokenAttribute>());
+        });
     }
 
     [Fact]
@@ -108,6 +128,23 @@ public class SatoraPluginControllerTests
         Assert.Equal(nameof(SatoraPluginController.Index), Assert.IsType<RedirectToActionResult>(result).ActionName);
     }
 
+    // ark-client refuses to settle a recoverable total below dust, so the withdrawals page offers its
+    // settle only from dust up.
+    [Theory]
+    [InlineData(330UL, true)]
+    [InlineData(329UL, false)]
+    [InlineData(0UL, false)]
+    public async Task TheWalletBalanceSaysWhetherItsRecoverableFundsCanBeSettled(ulong recoverable, bool canSettle)
+    {
+        var wallets = new RecordingWalletService { Balance = new ArkadeBalance(1_000, 0, recoverable) };
+        var controller = Controller(admin: false, allowHotWalletForAll: false, wallets);
+
+        var balance = JsonSerializer.SerializeToElement(Assert.IsType<JsonResult>(await controller.WalletBalance("store")).Value);
+
+        Assert.Equal(recoverable, balance.GetProperty("recoverableSats").GetUInt64());
+        Assert.Equal(canSettle, balance.GetProperty("canSettle").GetBoolean());
+    }
+
     private static SatoraPluginController Controller(bool admin, bool allowHotWalletForAll, SatoraWalletService wallets)
     {
         var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, "user") };
@@ -140,6 +177,10 @@ public class SatoraPluginControllerTests
             LightningNodeReplaces.Add(storeId);
             return Task.FromResult(true);
         }
+        public ArkadeBalance? Balance { get; set; }
+
+        public override Task<ArkadeBalance?> TryGetBalanceAsync(string storeId) => Task.FromResult(Balance);
+
     }
 
     private sealed class DiscardingTempDataProvider : ITempDataProvider

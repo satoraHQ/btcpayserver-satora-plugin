@@ -21,6 +21,7 @@ public class SatoraSentAlertsIntegrationTests(SatoraWalletIntegrationTests.Datab
         Assert.True(await Sent.TryAddAsync("alerts", "swap", "lightning/NearClaimCutoff/", now));
         Assert.False(await Sent.TryAddAsync("alerts", "swap", "lightning/NearClaimCutoff/", now.AddMinutes(1)));
         Assert.True(await Sent.TryAddAsync("alerts", "swap", "lightning/UnexpectedStatus/ClientInvalidFunded", now));
+        Assert.True(await Sent.TryAddAsync("alerts", "swap", "outgoing/FundingUnresolved/", now));
         Assert.True(await Sent.TryAddAsync("alerts", "", "lightning/StatusUnavailable/", now));
         Assert.True(await Sent.TryAddAsync("alerts-other", "swap", "lightning/NearClaimCutoff/", now));
 
@@ -28,6 +29,7 @@ public class SatoraSentAlertsIntegrationTests(SatoraWalletIntegrationTests.Datab
 
         Assert.True(await Sent.TryAddAsync("alerts", "swap", "lightning/NearClaimCutoff/", now));
         Assert.True(await Sent.TryAddAsync("alerts", "swap", "lightning/UnexpectedStatus/ClientInvalidFunded", now));
+        Assert.False(await Sent.TryAddAsync("alerts", "swap", "outgoing/FundingUnresolved/", now));
         Assert.False(await Sent.TryAddAsync("alerts", "", "lightning/StatusUnavailable/", now));
         Assert.False(await Sent.TryAddAsync("alerts-other", "swap", "lightning/NearClaimCutoff/", now));
     }

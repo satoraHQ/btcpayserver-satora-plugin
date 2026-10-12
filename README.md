@@ -3,12 +3,15 @@
 Satora is a [BTCPay Server](https://btcpayserver.org) plugin that gives each
 store its own Satora wallet on [Arkade](https://arkade.money). Customers pay
 into it over Lightning (BTC-LN), and Satora swaps turn each payment into
-bitcoin in the wallet. The store holds its own keys, with no custodian in
-between.
+bitcoin in the wallet. The wallet also pays BTCPay's Lightning payouts and
+refunds, and the store can withdraw from it to Arkade, Lightning and Bitcoin
+destinations. The store holds its own keys, with no custodian in between.
 
 The Satora page, under Wallets in the store's menu, sets up the store's Satora
 wallet, shows its balance and lists earlier swaps (see [Wallet](#wallet)).
-Lightning payments land in the wallet (see [Lightning](#lightning)).
+Lightning payments land in the wallet (see [Lightning](#lightning)). The wallet
+pays out over Lightning, to Arkade and on chain (see
+[Withdrawals](#withdrawals)).
 
 ## Requirements
 
@@ -46,20 +49,30 @@ as **Restore required** and offers only a restore from its recovery phrase. The
 earlier ciphertext is kept in `SatoraRetiredSeeds`.
 
 A wallet cannot be replaced while swaps that depend on it are in progress,
-including swaps waiting for a refund. Disable the wallet first, so no new swaps
-start. The refusal lists what blocks it. A swap that pays an invoice is named
-by that invoice, which BTCPay's invoice search finds. Everything else is named
-by its id: incoming Lightning swaps without a BTCPay invoice and swaps of
-earlier plugin versions. Replacing a wallet that holds funds needs a typed
-confirmation. The replaced seed's ciphertext is kept in the
-`SatoraRetiredSeeds` table. BTCPay's log records each wallet generated or
-restored, each refusal and its reason, and each time the wallet is enabled or
-disabled.
+including swaps waiting for a refund, or while a withdrawal waits to be marked
+sent or failed. Disable the wallet first, so no new swaps start. The refusal
+lists what blocks it. A swap that pays an invoice is named by that invoice,
+which BTCPay's invoice search finds. Everything else is named by its id:
+incoming Lightning swaps without a BTCPay invoice, Lightning payments out of
+the wallet, withdrawals and swaps of earlier plugin versions. Replacing a
+wallet that holds funds needs a typed confirmation. The replaced seed's
+ciphertext is kept in the `SatoraRetiredSeeds` table. BTCPay's log records each
+wallet generated or restored, each refusal and its reason, and each time the
+wallet is enabled or disabled.
 
 Back up `<BTCPay data directory>/SatoraWallets/` with the database and the
 keys. The SDK keeps each store's swap and contract databases there, in
 `<network>/<store id>/`, readable only by its owner on Unix. Swaps cannot be
 funded, claimed or refunded without them.
+
+Run one BTCPay instance per database. Never start a copy of the database and
+data directory while the original runs, for example a new host started before
+the old one stops during a migration, or a staging server restored from
+production's backup. Two instances running the same wallets can pay one swap
+twice, because each store's swap workers, its spending lock and the SDK's
+record of each funding live in one process and its data directory. BTCPay's
+automated payout processors assume the same, as they pay a payout before
+recording it.
 
 Satora runs on mainnet, signet and regtest; on testnet the wallet is
 unavailable. On signet the wallets use Mutinynet (the SDK's signet defaults)
@@ -96,8 +109,14 @@ reports but the wallet has no receipt for is never recorded as a payment.
 - LNURL-pay and Lightning addresses are turned off for the store, because the
   swap server cannot put a description hash in the invoice. Top-up invoices
   without an amount are offered without Lightning.
-- The wallet does not pay BTCPay's Lightning payouts and refunds. Pay them
-  another way.
+- BTCPay's Lightning payouts and refunds are paid from the wallet. Each payment
+  is an Arkade to Lightning swap whose VHTLC the wallet funds. The payment
+  completes once the swap server claims the VHTLC, which it can do only by
+  paying the invoice. If the server will no longer pay it, the payment fails
+  and the VHTLC is refunded into the wallet. The wallet does not pay the same
+  invoice twice, or an invoice without an amount. It refuses a swap whose fees
+  pass BTCPay's fee cap for the payment, or 3% plus 100 sats when there is
+  none.
 
 The store's connection string, `type=satora;storeid=<store>;key=<key>`, carries
 a key of its own. Anyone with the string can use the wallet as a Lightning node
@@ -118,11 +137,107 @@ BTCPay notifies the store's owners and the server admins when:
   arrive
 - a swap reaches an unexpected status.
 
+For payments out of the wallet it also notifies when:
+
+- the outcome of funding a swap cannot be resolved yet. Do not pay that invoice
+  another way.
+- funding a swap keeps failing, with the SDK's reason
+- refunding a failed payment fails twice
+- a refund without the swap server keeps failing, or is still refused two hours
+  past its refund locktime. The alert says what the swap still holds. Close the
+  payment on the withdrawals page only once it holds nothing.
+- payment statuses could not be read for 5 minutes
+- a payment's funds were refunded without the swap server
+- a withdrawal's outcome is unknown.
+
 An alert about a swap that pays an invoice names the invoice and links to it.
 
 Each alert goes out once per swap, or once per outage for status alerts, and a
 BTCPay restart does not send it again. After a restart, a claim that keeps
 failing is reported again once it has failed twice more.
+
+## Withdrawals
+
+The withdrawals page, opened with **Withdraw** on the Satora page, sends from
+the wallet to an Arkade address, a Lightning invoice, a Lightning address or
+LNURL, or a Bitcoin address. A Bitcoin withdrawal is a collaborative exit from
+Arkade, and its fee comes on top of the amount. Each withdrawal is reviewed
+first with its fees quoted, and runs only once per review. If its fees have
+grown past the review by the time it runs, it is refused. Amounts use a point
+as the decimal separator. A withdrawal to an Arkade address, Lightning address,
+LNURL or Bitcoin address can send everything the wallet can spend. An on-chain
+exit always leaves the Arkade server's dust amount, 330 sats, in the wallet as
+Arkade change.
+
+Withdrawals spend only confirmed and pre-confirmed funds. Recoverable funds
+(expired, swept or below dust) stay in the wallet until they are settled into
+an Arkade batch. While they add up to dust or more, **Settle recoverable
+funds** on the withdrawals page settles them. Recoverable funds below dust,
+such as the change an Arkade withdrawal leaves, cannot be settled on their own.
+They are settled once more funds become recoverable, and they never hold up a
+withdrawal.
+
+BTCPay's log records each withdrawal with its amount, fee and transaction, and
+each settle with its Arkade batch. For a Lightning withdrawal the transaction
+is the one funding its swap, and the log also records the payment hash of the
+invoice it pays. For a Lightning address or LNURL, that is the invoice its
+endpoint issued.
+
+If the wallet cannot tell whether an Arkade or on-chain withdrawal went out,
+for example because the Arkade server stopped answering mid-send or BTCPay
+restarted, the withdrawal is marked unknown or interrupted. No new withdrawal
+starts until someone who can change the store's settings checks the balance and
+marks it sent or failed. A running withdrawal cannot be marked, and an
+interrupted one only 30 minutes after it started. A Lightning withdrawal
+finishes by itself, like a Lightning payout. It is sent once the invoice is
+paid, and failed once the funds are back in the wallet.
+
+Funds in the last minutes before they expire (about 10 minutes on mainnet) are
+left out of every withdrawal and payment, because what they pay would expire
+with them. A withdrawal or payment the wallet cannot cover without them sends
+nothing, and the wallet renews them in the next Arkade batch. The withdrawals
+page then asks to try again in a minute. A Lightning payout or refund fails,
+and BTCPay retries it. The spendable balance still includes these funds.
+BTCPay's log records each renewal with its Arkade batch.
+
+A Lightning address or LNURL is never handed to the swap server. BTCPay fetches
+the invoice itself, as for its own Lightning payouts (an onion address through
+BTCPay's Tor proxy), and checks the amounts it accepts. The swap server only
+quotes and pays that invoice, so reviewing the withdrawal also asks the payee
+for an invoice. To send everything, the swap server first quotes what the
+wallet's sats pay after fees, including its estimate of the Lightning fee. The
+payee is then asked for an invoice of that amount. If the invoice's actual fee
+is higher than the estimate, the payee is asked once more for an invoice lower
+by the difference. If it is lower, the difference stays in the wallet.
+
+A Lightning payment's outcome is unknown when the swap server stops answering,
+no longer knows the payment, or has neither paid nor refunded it by its refund
+locktime. After that locktime the funds are taken back into the wallet without
+the server, but the payment stays pending, as the server may have paid first.
+The withdrawals page lists these payments, and payments in an unexpected
+status, with what each one's VHTLC still holds (**Still held in the swap**).
+Once the balance and the payee show what happened, someone who can change the
+store's settings closes the payment as paid or failed by typing `CLOSE`.
+Closing it as paid marks the BTCPay payout completed or the withdrawal sent.
+Closing it as failed cancels the payout or marks the withdrawal failed. Leave a
+payment open if its invoice was not paid and its funds are not back yet. They
+are taken back from about an hour after the refund locktime. A payment cannot
+be closed while its withdrawal is running, or closed as failed while its VHTLC
+still holds funds or cannot be read.
+
+### Who can spend from the wallet
+
+Withdrawing needs permission to change the store's settings. It does not need
+hot wallet rights, so the wallet keeps working for its store if an admin later
+turns hot wallets off.
+
+As the store's Lightning node, the wallet also pays whatever BTCPay pays over
+Lightning, under BTCPay's own permissions. That covers payouts approved by
+anyone who can manage the store's payouts, refunds, and invoices paid through
+the Greenfield API with a key allowed to use the store's Lightning node. With
+an automated Lightning payout processor enabled for the store, approved payouts
+are paid without anyone opening the Satora page. The Satora pages warn while
+one is enabled.
 
 ## Support
 
@@ -134,8 +249,8 @@ payment, include its swap id.
 
 The plugin stores its data in the BTCPay Postgres database under the schema
 `"BTCPayServer.Plugins.Satora"` (settings incl. the encrypted wallet seed, swap
-transactions and Lightning swaps). Its EF Core migration-history table lives in
-the search-path schema (typically `public`) as a table named
+transactions, Lightning swaps and withdrawals). Its EF Core migration-history
+table lives in the search-path schema (typically `public`) as a table named
 `BTCPayServer.Plugins.Satora`.
 
 To fully purge the plugin's data:

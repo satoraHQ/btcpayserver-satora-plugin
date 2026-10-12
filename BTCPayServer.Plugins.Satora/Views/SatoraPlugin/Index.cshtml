@@ -25,7 +25,7 @@
         <td>
             <br />
             <p>
-                Receive Lightning payments into this store's own <a href="https://satora.io" target="_blank" rel="noreferrer noopener">Satora</a> wallet. The wallet runs on Arkade, and its keys stay on this BTCPay server.<br />
+                Receive Lightning payments into this store's own <a href="https://satora.io" target="_blank" rel="noreferrer noopener">Satora</a> wallet, and spend from it through payouts and withdrawals. The wallet runs on Arkade, and its keys stay on this BTCPay server.<br />
                 Read the <a href="https://github.com/satoraHQ/btcpayserver-satora-plugin#readme" target="_blank" rel="noreferrer noopener">documentation</a> before you enable the wallet.
             </p>
         </td>
@@ -130,7 +130,7 @@
                         <label for="Enabled" class="form-check-label">Enabled</label>
                         <button type="submit" class="btn btn-primary">Save</button>
                     </div>
-                    <div class="form-text">Enabling makes the wallet the store's Lightning node and turns LNURL off, unless the store already uses another Lightning node. On mainnet, Lightning is offered only on invoices that expire within 20 minutes.</div>
+                    <div class="form-text">Enabling makes the wallet the store's Lightning node and turns LNURL off, unless the store already uses another Lightning node. BTCPay then pays its Lightning payouts and refunds from this wallet. API keys allowed to use the store's Lightning node can also pay invoices from it. On mainnet, Lightning is offered only on invoices that expire within 20 minutes.</div>
                 </form>
                 <form method="post" asp-action="RotateLightningKey" asp-route-storeId="@Model.StoreId" class="mb-4">
                     <button type="submit" class="btn btn-outline-secondary">Rotate Lightning connection key</button>
@@ -140,7 +140,7 @@
                 {
                     <details class="mb-4">
                         <summary>Use the Satora wallet as this store's Lightning node</summary>
-                        <p class="mt-3">This replaces the store's current Lightning node with the Satora wallet. Lightning payments then go to the wallet instead. Lightning is turned on at checkout and LNURL is turned off. To switch back, set up the old node again in the store's Lightning settings.</p>
+                        <p class="mt-3">This replaces the store's current Lightning node with the Satora wallet. Lightning payments and payouts then go through the wallet instead. Lightning is turned on at checkout and LNURL is turned off. To switch back, set up the old node again in the store's Lightning settings.</p>
                         <form method="post" asp-action="UseAsLightningNode" asp-route-storeId="@Model.StoreId">
                             <div class="form-group">
                                 <label for="LightningReplaceConfirmation" class="form-label">Type @SeedWriteGuard.ConfirmationWord to replace the store's Lightning node</label>
@@ -158,7 +158,7 @@
                 </form>
                 <details class="mb-4">
                     <summary>Replace the wallet</summary>
-                    <p class="mt-3">Replacing is blocked while swaps of this wallet are open. Back up its recovery phrase first. It cannot be shown after replacing. The old seed stays on the server, encrypted, but is no longer used.</p>
+                    <p class="mt-3">Replacing is blocked while swaps or withdrawals of this wallet are open. Back up its recovery phrase first. It cannot be shown after replacing. The old seed stays on the server, encrypted, but is no longer used.</p>
                     <form method="post" asp-action="GenerateWallet" asp-route-storeId="@Model.StoreId" class="mb-4">
                         <div class="form-group">
                             <label for="GenerateReplaceConfirmation" class="form-label">Type @SeedWriteGuard.ConfirmationWord if the current wallet holds funds</label>
@@ -174,40 +174,9 @@
 
         @if (hasSeed)
         {
-            <div id="SatoraWalletBalance" class="widget store-wallet-balance mb-4" data-url="@Url.Action("WalletBalance", "SatoraPlugin", new { storeId = Model.StoreId })">
-                <h6 class="mb-2">Satora wallet balance</h6>
-                <div class="text-secondary" data-balance-status>Loading</div>
-                <div class="balances d-flex flex-wrap gap-4 d-none" data-balance-values>
-                    <div class="balance">
-                        <h3 class="d-inline-block me-1" data-balance="confirmedSats" data-sensitive></h3>
-                        <span class="text-secondary fw-semibold text-nowrap">BTC confirmed</span>
-                    </div>
-                    <div class="balance">
-                        <h3 class="d-inline-block me-1" data-balance="preConfirmedSats" data-sensitive></h3>
-                        <span class="text-secondary text-nowrap">BTC pre-confirmed</span>
-                    </div>
-                    <div class="balance">
-                        <h3 class="d-inline-block me-1" data-balance="recoverableSats" data-sensitive></h3>
-                        <span class="text-secondary text-nowrap">BTC recoverable</span>
-                    </div>
-                </div>
-            </div>
-            <script>
-                (function () {
-                    const widget = document.getElementById('SatoraWalletBalance');
-                    const status = widget.querySelector('[data-balance-status]');
-                    const btc = sats => `${Math.floor(sats / 1e8)}.${String(sats % 1e8).padStart(8, '0')}`;
-                    fetch(widget.dataset.url, { credentials: 'same-origin', headers: { Accept: 'application/json' } })
-                        .then(response => { if (!response.ok) throw new Error(response.statusText); return response.json(); })
-                        .then(balance => {
-                            for (const key of ['confirmedSats', 'preConfirmedSats', 'recoverableSats'])
-                                widget.querySelector(`[data-balance="${key}"]`).textContent = btc(balance[key]);
-                            status.classList.add('d-none');
-                            widget.querySelector('[data-balance-values]').classList.remove('d-none');
-                        })
-                        .catch(() => { status.textContent = 'The wallet balance could not be read. Check that the Arkade server is reachable.'; });
-                })();
-            </script>
+            <partial name="_SatoraWalletBalance" model="Model.StoreId" />
+            <a asp-controller="SatoraWithdraw" asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-primary mb-3">Withdraw</a>
+            <partial name="_SatoraSpendingBoundary" model="Model.AutomatedLightningPayouts" />
         }
     }
 </div>

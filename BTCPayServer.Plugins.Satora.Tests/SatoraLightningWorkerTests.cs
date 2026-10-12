@@ -429,12 +429,13 @@ public class SatoraLightningWorkerTests
             _worker.Sent.ToDictionary(n => n.SwapId!, n => n.InvoiceId));
     }
 
-    // The plugin's own page lists no swaps.
+    // The plugin's own page lists no swaps. A payment out of the wallet pays no invoice of the store's.
     [Theory]
     [InlineData(Problems.NearClaimCutoff, "invoice-1", "UIInvoice/Invoice/invoice-1", "Satora swap swap of invoice invoice-1 is paid")]
     [InlineData(Problems.UnknownToServer, "invoice-1", "UIInvoice/Invoice/invoice-1", "The Satora swap server does not know swap swap of invoice invoice-1.")]
-    // Sent before alerts named the invoice.
+    // Sent before alerts named the invoice, or about a payment out of the wallet.
     [InlineData(Problems.UnknownToServer, null, "SatoraPlugin/Index/store", "The Satora swap server does not know swap swap.")]
+    [InlineData(Problems.RefundedWithoutServer, null, "SatoraWithdraw/Index/store", "The funds of Lightning payment swap were refunded")]
     public void AnAlertAboutAnIncomingSwapNamesAndLeadsToItsInvoice(Problems problem, string? invoiceId, string link, string body)
     {
         INotificationHandler handler = new SatoraLightningNotification.Handler(new RouteLinks(), new BTCPayServerOptions { RootPath = "/" });
@@ -617,7 +618,7 @@ public class SatoraLightningWorkerTests
 
         public override Task<string> GetClaimAddressAsync(string storeId, CancellationToken cancellationToken) => Task.FromResult(Address());
 
-        public override Task<SdkArkadeSettlement> ClaimAsync(string storeId, string swapId, string destination)
+        public override Task<SdkArkadeSettlement> ClaimAsync(string storeId, string swapId, string destination, CancellationToken cancellationToken)
         {
             events.Add($"claim {swapId} {destination}");
             DuringClaim?.Invoke();

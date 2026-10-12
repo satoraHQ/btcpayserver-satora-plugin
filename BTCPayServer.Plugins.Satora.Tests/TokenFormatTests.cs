@@ -50,4 +50,16 @@ public class TokenFormatTests
     {
         Assert.Equal(expected, TokenFormat.ExplorerUrl(address, token));
     }
+
+    // An offboard's commitment txid as the SDK returned it; esplora found it only without the prefix.
+    [Theory]
+    [InlineData("0xd073afb6857e07ddcaa39c6874381aaf419d3a3c781493a4af492fe87e7b5bba", "d073afb6857e07ddcaa39c6874381aaf419d3a3c781493a4af492fe87e7b5bba")]
+    [InlineData("d073afb6857e07ddcaa39c6874381aaf419d3a3c781493a4af492fe87e7b5bba", "d073afb6857e07ddcaa39c6874381aaf419d3a3c781493a4af492fe87e7b5bba")]
+    [InlineData("0xd073afb6857e07ddcaa39c6874381aaf419d3a3c781493a4af492fe87e7b5bbz", "0xd073afb6857e07ddcaa39c6874381aaf419d3a3c781493a4af492fe87e7b5bbz")]
+    [InlineData("0x1234", "0x1234")]
+    [InlineData(null, null)]
+    public void BareTxIdDropsTheSdksHexPrefix(string? txid, string? expected)
+    {
+        Assert.Equal(expected, TokenFormat.BareTxId(txid));
+    }
 }

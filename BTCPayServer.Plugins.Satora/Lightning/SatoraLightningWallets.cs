@@ -17,8 +17,8 @@ public class SatoraLightningWallets(SatoraWalletRegistry registry)
     public virtual async Task<string> GetClaimAddressAsync(string storeId, CancellationToken cancellationToken) =>
         await (await registry.GetAsync(storeId)).RefreshArkadeAddressAsync(cancellationToken);
 
-    public virtual async Task<SdkArkadeSettlement> ClaimAsync(string storeId, string swapId, string destination) =>
-        await (await registry.GetAsync(storeId)).Client.SettleAsync(swapId, SdkArkadeSpend.Claim, destination);
+    public virtual Task<SdkArkadeSettlement> ClaimAsync(string storeId, string swapId, string destination, CancellationToken cancellationToken) =>
+        registry.UseAsync(storeId, wallet => wallet.Client.SettleAsync(swapId, SdkArkadeSpend.Claim, destination), cancellationToken);
 
     // Reads the SDK's claim journal, arkd's indexer and the claim window, and sends nothing that carries
     // the preimage. False is final: no later call can complete the claim.

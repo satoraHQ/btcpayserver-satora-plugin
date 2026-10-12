@@ -24,10 +24,23 @@ public class SatoraLightningSwap
 
     public long? ReceiveSats { get; set; }
 
-    // VHTLC refund locktime minus the SDK's claim margin: no claim can start after it.
+    // Incoming: VHTLC refund locktime minus the SDK's claim margin: no claim can start after it.
+    // Outgoing: the VHTLC refund locktime, after which the wallet can refund without the swap server.
     public DateTimeOffset ClaimCutoff { get; set; }
 
     public DateTimeOffset ExpiresAt { get; set; }
+
+    // Outgoing only. Set before the first FundArkadeSwapAsync; from then on the VHTLC may hold the
+    // wallet's sats, and only the worker decides what happened. Cleared again only when the SDK
+    // refused that first call for funds about to expire, before it recorded or sent anything.
+    public bool FundingAttempted { get; set; }
+
+    // Outgoing only: the sats the VHTLC takes from the wallet, invoice amount plus the swap's fees.
+    public long? FundingSats { get; set; }
+
+    public string? FundingTxId { get; set; }
+
+    public string? RefundTxId { get; set; }
 
     public bool DoNotClaim { get; set; }
 

@@ -53,5 +53,12 @@ namespace BTCPayServer.Plugins.Satora.Models
             }
             return null;
         }
+
+        // The SDK returns Ark and commitment txids as 0x-prefixed hex (its Bitcoin refund txids come
+        // bare), while explorers, arkd and bitcoind take bare hex. Not for EVM hashes, which keep their 0x.
+        public static string? BareTxId(string? txid) =>
+            txid is { Length: 66 } && txid.StartsWith("0x", StringComparison.Ordinal) && txid[2..].All(char.IsAsciiHexDigit)
+                ? txid[2..]
+                : txid;
     }
 }
