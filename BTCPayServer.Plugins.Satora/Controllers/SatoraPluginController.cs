@@ -1,8 +1,11 @@
+using System.Globalization;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Client;
+using BTCPayServer.Data;
 using BTCPayServer.Models.StoreViewModels;
 using BTCPayServer.Plugins.Satora.Models;
 using BTCPayServer.Plugins.Satora.Services;
+using BTCPayServer.Plugins.Satora.Stable;
 using BTCPayServer.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -19,14 +22,25 @@ namespace BTCPayServer.Plugins.Satora.Controllers
         SatoraPluginService pluginService,
         SatoraWalletService walletService,
         IAuthorizationService authorizationService,
-        PoliciesSettings policiesSettings) : Controller
+        PoliciesSettings policiesSettings,
+        SatoraStableQuotes stableQuotes,
+        ILogger<SatoraPluginController> logger) : Controller
     {
+        private static readonly TimeSpan QuoteTimeout = TimeSpan.FromSeconds(15);
 
         [HttpGet]
         public async Task<IActionResult> Index([FromRoute] string storeId)
         {
             var model = await pluginService.GetStoreData(storeId);
             model.CanUseHotWallet = await CanUseHotWallet();
+            model.PaymentTolerance = HttpContext.GetStoreData().GetStoreBlob().PaymentTolerance;
+            // From the last quote read, or the minimum before any: the page asks the swap server nothing.
+            model.StablecoinToleranceShortfalls = model.Stablecoins
+                .Select(coin => (Coin: coin, Floor: stableQuotes.LastRead(coin) is { } quote
+                    ? SatoraStableActions.ToleranceFloorPercent(quote)
+                    : SatoraStableActions.MinToleranceFloorPercent))
+                .Where(c => (decimal)model.PaymentTolerance < c.Floor)
+                .ToList();
             return View(model);
         }
 
@@ -126,6 +140,46 @@ namespace BTCPayServer.Plugins.Satora.Controllers
             return RedirectToAction(nameof(Index), new { storeId });
         }
 
+        // Turning a stablecoin on needs hot wallet rights, as enabling the wallet does, and turning one off
+        // only the store's settings permission. The DEX swap that funds a payment can pay the wallet up
+        // to the swap's fees less than quoted, so one is turned on only while the store's payment
+        // tolerance covers that share of a typical payment; below it such an invoice would not settle.
+        [HttpPost("stablecoins")]
+        public async Task<IActionResult> Stablecoins([FromRoute] string storeId, SatoraStablecoinsViewModel vm)
+        {
+            var requested = SatoraStablePaymentMethod.All.Where(c => vm.Methods?.Contains(c.Id.ToString()) is true).ToList();
+            var added = requested.Except(await walletService.GetStablecoinsAsync(storeId)).ToList();
+            if (added.Count > 0 && !await CanUseHotWallet())
+                return NotFound();
+            var tolerance = HttpContext.GetStoreData().GetStoreBlob().PaymentTolerance;
+            foreach (var coin in added)
+            {
+                decimal floor;
+                try
+                {
+                    floor = SatoraStableActions.ToleranceFloorPercent(await stableQuotes.GetAsync(storeId, coin, HttpContext.RequestAborted).WaitAsync(QuoteTimeout));
+                }
+                catch (Exception e)
+                {
+                    logger.LogWarning(e, "Could not read the Satora quote for {PaymentMethodId} of store {StoreId}", coin.Id, storeId);
+                    TempData[WellKnownTempData.ErrorMessage] = $"The swap server's fees for {coin.PrettyName} could not be read, so nothing was changed. Try again in a minute.";
+                    return RedirectToAction(nameof(Index), new { storeId });
+                }
+                if ((decimal)tolerance < floor)
+                {
+                    TempData[WellKnownTempData.ErrorMessage] = string.Create(CultureInfo.InvariantCulture,
+                        $"{coin.PrettyName} needs a payment tolerance of at least {floor:0.#}%, and the store's is {tolerance:0.##}%. " +
+                        $"Raise it a little above that, as the minimum rises with the swap's fees. Nothing was changed.");
+                    return RedirectToAction(nameof(Index), new { storeId });
+                }
+            }
+            if (await walletService.SetStablecoinsAsync(storeId, requested))
+                TempData[WellKnownTempData.SuccessMessage] = "Stablecoin payment methods saved.";
+            else
+                TempData[WellKnownTempData.ErrorMessage] = "Set up the wallet first.";
+            return RedirectToAction(nameof(Index), new { storeId });
+        }
+
         [HttpGet("wallet-balance")]
         public async Task<IActionResult> WalletBalance([FromRoute] string storeId)
         {
@@ -139,28 +193,6 @@ namespace BTCPayServer.Plugins.Satora.Controllers
                 recoverableSats = balance.recoverableSats,
                 canSettle = balance.recoverableSats >= SatoraWithdrawalService.DustSats
             });
-        }
-
-        [HttpGet]
-        [Route("GetSwapStatus")]
-        public async Task<ActionResult> GetSwapStatus([FromRoute] string storeId, string swapId)
-        {
-            try
-            {
-                var status = await pluginService.DoGetSwapStatus(storeId, swapId);
-                return Ok(status);
-            }
-            catch (Exception ex)
-            {
-                return BadRequest(ex.Message);
-            }
-        }
-
-        [HttpGet("swap/{swapId}")]
-        public async Task<IActionResult> SwapDetails([FromRoute] string storeId, [FromRoute] string swapId)
-        {
-            var model = await pluginService.GetSwapDetailsAsync(storeId, swapId);
-            return model is null ? NotFound() : View(model);
         }
 
         // As UIStoreOnChainWalletsController: a hot wallet is for server admins unless the server

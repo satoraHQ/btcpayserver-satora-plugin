@@ -10,6 +10,12 @@ public static class SatoraNetworks
     public const string BaseUrlKey = "SATORA_BASEURL";
     public const string ArkadeServerUrlKey = "SATORA_ARKADESERVERURL";
     public const string EsploraUrlKey = "SATORA_ESPLORAURL";
+    // Each EVM chain's node for the stablecoin swaps' deposit, relay, claim and sweep reads, on mainnet
+    // too: a node can delay a funding but not move the deposit, which takes the depositor's signature,
+    // a claim takes its word for a conversion shortfall only within the invoice's payment tolerance,
+    // and the public nodes the SDK falls back to rate-limit. Off mainnet the chain is a test fork, so
+    // the stablecoin methods need one.
+    public const string EvmRpcArbitrumKey = "SATORA_EVMRPC_ARBITRUM";
 
     public static SatoraBitcoinNetwork FromChain(ChainName chain)
     {
@@ -42,6 +48,16 @@ public static class SatoraNetworks
         SatoraBitcoinNetwork.Regtest => "http://localhost:3000/api",
         _ => null
     };
+
+    public static string? EvmRpcKey(long chainId) => chainId switch
+    {
+        42161 => EvmRpcArbitrumKey,
+        _ => null
+    };
+
+    // Null for the SDK's public default.
+    public static string? EvmRpcUrl(IConfiguration configuration, long chainId) =>
+        EvmRpcKey(chainId) is { } key ? NullIfEmpty(configuration[key]) : null;
 
     public static bool HasEndpointOverrides(IConfiguration configuration) =>
         new[] { BaseUrlKey, ArkadeServerUrlKey, EsploraUrlKey }.Any(key => NullIfEmpty(configuration[key]) is not null);

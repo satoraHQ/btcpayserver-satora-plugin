@@ -1,3 +1,5 @@
+using BTCPayServer.Plugins.Satora.Stable;
+
 
 namespace BTCPayServer.Plugins.Satora.Models
 {
@@ -15,6 +17,11 @@ namespace BTCPayServer.Plugins.Satora.Models
 
         public bool AutomatedLightningPayouts { get; set; }
 
-        public List<SatoraTx> Transactions { get; set; } = new();
+        public IReadOnlyList<SatoraStablecoin> Stablecoins { get; set; } = [];
+
+        public double PaymentTolerance { get; set; }
+
+        // The coins turned on whose payments get no swap while the tolerance is below their floor.
+        public IReadOnlyList<(SatoraStablecoin Coin, decimal Floor)> StablecoinToleranceShortfalls { get; set; } = [];
     }
 }

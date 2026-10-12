@@ -7,6 +7,7 @@ using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Services;
+using BTCPayServer.Plugins.Satora.Stable;
 
 [assembly: InternalsVisibleTo("BTCPayServer.Plugins.Satora.Tests")]
 
@@ -21,7 +22,6 @@ public class Plugin : BaseBTCPayServerPlugin
 
     public override void Execute(IServiceCollection services)
     {
-        // The old stablecoin checkout extensions and SatoraSwapWatcher are not registered; see SatoraSwapController.
         services.AddUIExtension("store-wallets-nav", "SatoraPluginHeaderNav")
                 .AddUIExtension("layout-banner", "SatoraPaymentMethodNames")
                 .AddSingleton<SatoraPluginDbContextFactory>()
@@ -68,11 +68,23 @@ public class Plugin : BaseBTCPayServerPlugin
                 .AddUIExtension("checkout-end", "SatoraChain/SatoraChainMethodCheckout")
                 .AddUIExtension("store-invoices-payments", "SatoraChain/ViewSatoraChainPaymentData")
                 .AddHostedService<SatoraChainWorker>()
-                .AddHostedService<SatoraChainPromptRenewer>()
+                .AddHostedService<SatoraPromptRenewer>()
                 .AddSingleton<INotificationHandler, SatoraChainNotification.Handler>()
-                .AddSingleton<SatoraSettlementService>()
-                .AddSingleton<SatoraService>()
+                .AddSingleton<SatoraStableSwaps>()
+                .AddSingleton<SatoraStableQuotes>()
+                .AddSingleton<SatoraStableCredit>()
+                .AddSingleton(s => ActivatorUtilities.CreateInstance<SatoraStableWallets>(s, BitcoinNetwork(s)))
+                .AddSingleton<SatoraStoreStableConfig>()
+                .AddUIExtension("checkout-end", "SatoraStable/SatoraStableMethodCheckout")
+                .AddHostedService<SatoraStableWorker>()
+                .AddSingleton<INotificationHandler, SatoraStableNotification.Handler>()
                 .AddSingleton<SatoraPluginService>();
+        // One method per coin, as BTCPay registers one per network.
+        foreach (var coin in SatoraStablePaymentMethod.All)
+            services.AddDefaultPrettyName(coin.Id, coin.PrettyName)
+                    .AddSingleton<IPaymentMethodHandler>(s => ActivatorUtilities.CreateInstance<SatoraStablePaymentHandler>(s, coin, BitcoinNetwork(s)))
+                    .AddSingleton<IPaymentLinkExtension>(_ => new SatoraStablePaymentLinkExtension(coin))
+                    .AddSingleton<ICheckoutModelExtension>(s => ActivatorUtilities.CreateInstance<SatoraStableCheckoutModelExtension>(s, coin));
     }
 
     private static BTCPayNetwork BitcoinNetwork(IServiceProvider services) =>

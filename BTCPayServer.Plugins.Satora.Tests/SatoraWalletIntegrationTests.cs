@@ -706,6 +706,8 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
 
         public RecordingChainConfig ChainConfig { get; } = new();
 
+        public RecordingStableConfig StableConfig { get; } = new();
+
         public FakeLightningInvoices LightningInvoices { get; } = new();
 
         private string ConnectionString => new NpgsqlConnectionStringBuilder(Server) { Database = _name }.ConnectionString;
@@ -776,7 +778,7 @@ public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database 
             var registry = new SatoraWalletRegistry(_contexts, protector, null!, _networks, configuration,
                 Options.Create(new DataDirectories { DataDir = DataDir }), registryLogger ?? NullLogger<SatoraWalletRegistry>.Instance);
             _registries.Add(registry);
-            return (registry, new SatoraWalletService(_contexts, protector, registry, LightningConfig, ChainConfig, new SatoraAutoWithdrawRules(_contexts),
+            return (registry, new SatoraWalletService(_contexts, protector, registry, LightningConfig, ChainConfig, StableConfig, new SatoraAutoWithdrawRules(_contexts),
                 LightningInvoices, logger ?? NullLogger<SatoraWalletService>.Instance));
         }
 

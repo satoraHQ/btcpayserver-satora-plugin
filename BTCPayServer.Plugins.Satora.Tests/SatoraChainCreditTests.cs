@@ -5,6 +5,7 @@ using BTCPayServer.Events;
 using BTCPayServer.Logging;
 using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Satora.Chain;
+using BTCPayServer.Plugins.Satora.Services;
 using BTCPayServer.Services.Invoices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -15,7 +16,7 @@ using Xunit;
 
 namespace BTCPayServer.Plugins.Satora.Tests;
 
-// What SatoraChainCredit and SatoraChainPromptRenewer write to an invoice, decided over the invoice alone.
+// What SatoraChainCredit and SatoraPromptRenewer write to an invoice, decided over the invoice alone.
 public class SatoraChainCreditTests
 {
     public static TheoryData<PaymentStatus?, PaymentStatus, SatoraChainPaymentWrite> Writes => new()
@@ -158,7 +159,7 @@ public class SatoraChainCreditTests
         await renewer.StopAsync(Ct);
 
         Assert.Equal(1, renewer.Renewals);
-        Assert.False(SatoraChainPromptRenewer.NeedsRenewal(invoice));
+        Assert.False(SatoraPromptRenewer.NeedsRenewal(invoice, SatoraPromptRenewer.SwapPrompts[0]));
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -223,7 +224,7 @@ public class SatoraChainCreditTests
     }
 
     private sealed class TestRenewer(SatoraChainCredit credit, Func<bool> renew, EventAggregator? events = null, InvoiceEntity? stored = null)
-        : SatoraChainPromptRenewer(events!, null!, null!, credit, NullLogger<SatoraChainPromptRenewer>.Instance)
+        : SatoraPromptRenewer(events!, null!, null!, credit, null!, NullLogger<SatoraPromptRenewer>.Instance)
     {
         public int Renewals { get; private set; }
 
@@ -234,7 +235,7 @@ public class SatoraChainCreditTests
         // How long the swap server takes to answer.
         public TimeSpan Delay { get; init; }
 
-        protected override async Task<bool> RenewPromptAsync(string invoiceId)
+        protected override async Task<bool> RenewPromptAsync(string invoiceId, PaymentMethodId method)
         {
             Renewals++;
             Renewed.TrySetResult(invoiceId);

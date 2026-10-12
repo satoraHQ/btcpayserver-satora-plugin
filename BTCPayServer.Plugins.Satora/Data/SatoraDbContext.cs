@@ -20,6 +20,7 @@ public class SatoraPluginDbContext : DbContext
     public DbSet<SatoraWithdrawal> SatoraWithdrawals { get; set; }
     public DbSet<SatoraChainSwap> SatoraChainSwaps { get; set; }
     public DbSet<SatoraAutoWithdrawRule> SatoraAutoWithdrawRules { get; set; }
+    public DbSet<SatoraStableSwap> SatoraStableSwaps { get; set; }
     public DbSet<SatoraSentAlert> SatoraSentAlerts { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -39,6 +40,11 @@ public class SatoraPluginDbContext : DbContext
         });
         modelBuilder.Entity<SatoraChainSwap>(swap => swap.Property(s => s.Status).HasConversion<string>());
         modelBuilder.Entity<SatoraAutoWithdrawRule>(rule => rule.Property(r => r.DestinationType).HasConversion<string>());
+        modelBuilder.Entity<SatoraStableSwap>(swap =>
+        {
+            swap.Property(s => s.Status).HasConversion<string>();
+            swap.Property(s => s.AttentionReason).HasConversion<string>();
+        });
         modelBuilder.Entity<SatoraSentAlert>().HasKey(a => new { a.StoreId, a.SwapId, a.Problem });
     }
 }

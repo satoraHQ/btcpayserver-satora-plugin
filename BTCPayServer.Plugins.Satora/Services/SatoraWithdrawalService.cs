@@ -1006,9 +1006,9 @@ public class SatoraWithdrawalService(
     private static bool TooSmallToSettle(SdkException error) =>
         error.Kind == SdkErrorKind.Transport && error.Message.Contains("cannot settle into sub-dust VTXO", StringComparison.Ordinal);
 
-    // The SDK reads a VHTLC only for a swap in its storage (arkade_htlc), and refuses any other with
-    // an InvalidSwap that only its text tells apart.
-    private static bool IsSwapRecordMissing(SdkException error) =>
+    // The SDK reads a swap's VHTLC or deposit address only for a swap in this wallet's storage, which
+    // it keeps apart per seed, and refuses any other with an InvalidSwap that only its text tells apart.
+    internal static bool IsSwapRecordMissing(SdkException error) =>
         error.Kind == SdkErrorKind.InvalidSwap && error.Message.Contains("swap record missing", StringComparison.Ordinal);
 
     // Writes the withdrawal's row, then sends with the withdrawal marked running. Null when its id was

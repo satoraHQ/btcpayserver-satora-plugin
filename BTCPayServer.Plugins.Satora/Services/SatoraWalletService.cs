@@ -4,6 +4,7 @@ using BTCPayServer.Plugins.Satora.Chain;
 using BTCPayServer.Plugins.Satora.Data;
 using BTCPayServer.Plugins.Satora.Lightning;
 using BTCPayServer.Plugins.Satora.Models;
+using BTCPayServer.Plugins.Satora.Stable;
 using Microsoft.EntityFrameworkCore;
 using ArkadeBalance = uniffi.satora_sdk_ffi.ArkadeBalance;
 
@@ -15,6 +16,7 @@ public class SatoraWalletService(
     SatoraWalletRegistry registry,
     SatoraStoreLightningConfig lightningConfig,
     SatoraStoreChainConfig chainConfig,
+    SatoraStoreStableConfig stableConfig,
     SatoraAutoWithdrawRules autoWithdrawRules,
     SatoraLightningCredit lightningInvoices,
     ILogger<SatoraWalletService> logger)
@@ -102,6 +104,7 @@ public class SatoraWalletService(
                 await registry.EvictAsync(storeId, async () => await CountOpenOperationsAsync(storeId) == 0);
             await lightningConfig.SyncAsync(storeId, enabled, settings.LightningConnectionKey);
             await chainConfig.SyncAsync(storeId, enabled);
+            await stableConfig.SyncAsync(storeId, enabled, SatoraStablePaymentMethod.Parse(settings.StablecoinMethods));
             return true;
         }
         finally
@@ -169,6 +172,39 @@ public class SatoraWalletService(
         }
     }
 
+    public virtual async Task<IReadOnlyList<SatoraStablecoin>> GetStablecoinsAsync(string storeId)
+    {
+        await using var ctx = dbContextFactory.CreateContext();
+        return SatoraStablePaymentMethod.Parse(await ctx.SatoraSettings
+            .Where(s => s.StoreId == storeId)
+            .Select(s => s.StablecoinMethods)
+            .FirstOrDefaultAsync());
+    }
+
+    // The stablecoin methods the owner offers, kept whatever the wallet's state: false when the store
+    // has no wallet yet. Under the wallet lock, so an enable or seed write never syncs the store's
+    // methods from a choice this has replaced.
+    public virtual async Task<bool> SetStablecoinsAsync(string storeId, IReadOnlyCollection<SatoraStablecoin> coins)
+    {
+        var walletLock = WalletLock(storeId);
+        await walletLock.WaitAsync();
+        try
+        {
+            await using var ctx = dbContextFactory.CreateContext();
+            var settings = await ctx.SatoraSettings.FirstOrDefaultAsync(s => s.StoreId == storeId);
+            if (settings is null)
+                return false;
+            settings.StablecoinMethods = SatoraStablePaymentMethod.Format(coins);
+            await ctx.SaveChangesAsync();
+            await stableConfig.SyncAsync(storeId, settings.Enabled, SatoraStablePaymentMethod.Parse(settings.StablecoinMethods));
+            return true;
+        }
+        finally
+        {
+            walletLock.Release();
+        }
+    }
+
     // Swaps in either direction, and withdrawals whose outcome only the owner can tell, that still
     // need the store's current seed. Every table that holds such rows adds its count here. Rows from
     // before the current seed was created belong to a seed it replaced: a replace needs none of them
@@ -178,7 +214,7 @@ public class SatoraWalletService(
         await using var ctx = dbContextFactory.CreateContext();
         var open = await OpenOperationsAsync(ctx, storeId);
         return await open.Swaps.CountAsync() + await open.LightningSwaps.CountAsync() + await open.Withdrawals.CountAsync() +
-               await open.ChainSwaps.CountAsync();
+               await open.ChainSwaps.CountAsync() + await open.StableSwaps.CountAsync();
     }
 
     // What CountOpenOperationsAsync counts, for the store to find: swaps that pay an invoice by their
@@ -203,6 +239,10 @@ public class SatoraWalletService(
             await open.ChainSwaps.Where(s => s.NeedsRefundAt == null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
         Add("refunds on the On-chain refunds page for invoices",
             await open.ChainSwaps.Where(s => s.NeedsRefundAt != null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
+        Add("stablecoin swaps of invoices",
+            await open.StableSwaps.Where(s => s.NeedsAttentionAt == null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
+        Add("deposits on the Stablecoin refunds page for invoices",
+            await open.StableSwaps.Where(s => s.NeedsAttentionAt != null).OrderBy(s => s.CreatedAt).Select(s => s.InvoiceId).ToListAsync());
         Add("withdrawals to mark sent or failed on the withdrawals page",
             await open.Withdrawals.OrderBy(w => w.CreatedAt).Select(w => w.Id).ToListAsync());
         Add("swaps of an earlier plugin version", await open.Swaps.OrderBy(t => t.DateT).Select(t => t.TxID).ToListAsync());
@@ -220,7 +260,8 @@ public class SatoraWalletService(
         IQueryable<SatoraTx> Swaps,
         IQueryable<SatoraLightningSwap> LightningSwaps,
         IQueryable<SatoraWithdrawal> Withdrawals,
-        IQueryable<SatoraChainSwap> ChainSwaps);
+        IQueryable<SatoraChainSwap> ChainSwaps,
+        IQueryable<SatoraStableSwap> StableSwaps);
 
     private static async Task<OpenOperations> OpenOperationsAsync(SatoraPluginDbContext ctx, string storeId)
     {
@@ -234,6 +275,8 @@ public class SatoraWalletService(
         var withdrawals = SatoraWithdrawals.Unresolved(ctx.SatoraWithdrawals.Where(w => w.StoreId == storeId));
         // Open on-chain swaps include those waiting for a refund, which only this seed can sign.
         var chainSwaps = ctx.SatoraChainSwaps.Where(s => s.StoreId == storeId && s.CompletedAt == null);
+        // Open stablecoin swaps include those waiting for a sweep, whose tokens only this seed can move.
+        var stableSwaps = ctx.SatoraStableSwaps.Where(s => s.StoreId == storeId && s.CompletedAt == null);
         if (walletCreated is { } created)
         {
             var since = created.UtcDateTime;
@@ -241,8 +284,11 @@ public class SatoraWalletService(
             lightningSwaps = lightningSwaps.Where(s => s.CreatedAt >= created);
             withdrawals = withdrawals.Where(w => w.CreatedAt >= created);
             chainSwaps = chainSwaps.Where(s => s.CreatedAt >= created);
+            // A swap of a replaced phrase restored since, listed again for a sweep, predates the
+            // wallet's creation but not its listing.
+            stableSwaps = stableSwaps.Where(s => s.CreatedAt >= created || s.NeedsAttentionAt >= created);
         }
-        return new OpenOperations(swaps, lightningSwaps, withdrawals, chainSwaps);
+        return new OpenOperations(swaps, lightningSwaps, withdrawals, chainSwaps, stableSwaps);
     }
 
     private async Task<SeedWriteRefusal> WriteSeedAsync(string storeId, string mnemonic, SeedWriteKind kind, string? confirmation)
@@ -308,6 +354,7 @@ public class SatoraWalletService(
                     registry.Warm(storeId);
                 await lightningConfig.SyncAsync(storeId, settings.Enabled, settings.LightningConnectionKey);
                 await chainConfig.SyncAsync(storeId, settings.Enabled);
+                await stableConfig.SyncAsync(storeId, settings.Enabled, SatoraStablePaymentMethod.Parse(settings.StablecoinMethods));
                 return SeedWriteRefusal.None;
             }
             // Counted before the registry's gate too, which waits for every wallet action in flight,
@@ -335,6 +382,7 @@ public class SatoraWalletService(
             {
                 await lightningConfig.SyncAsync(storeId, settings!.Enabled, settings.LightningConnectionKey);
                 await chainConfig.SyncAsync(storeId, settings.Enabled);
+                await stableConfig.SyncAsync(storeId, settings.Enabled, SatoraStablePaymentMethod.Parse(settings.StablecoinMethods));
             }
             return replaced;
         }

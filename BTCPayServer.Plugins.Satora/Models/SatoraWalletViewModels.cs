@@ -30,3 +30,9 @@ public class SatoraUseAsLightningNodeViewModel
 {
     public string? ReplaceConfirmation { get; set; }
 }
+
+public class SatoraStablecoinsViewModel
+{
+    // The payment method ids of the stablecoins to offer.
+    public List<string>? Methods { get; set; }
+}

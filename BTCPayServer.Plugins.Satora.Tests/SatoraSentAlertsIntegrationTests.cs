@@ -23,7 +23,7 @@ public class SatoraSentAlertsIntegrationTests(SatoraWalletIntegrationTests.Datab
         Assert.True(await Sent.TryAddAsync("alerts", "swap", "chain/Overpaid/", now));
         Assert.False(await Sent.TryAddAsync("alerts", "swap", "chain/Overpaid/", now.AddMinutes(1)));
         Assert.True(await Sent.TryAddAsync("alerts", "swap", "chain/UnexpectedStatus/Expired", now));
-        Assert.True(await Sent.TryAddAsync("alerts", "swap", "outgoing/FundingUnresolved/", now));
+        Assert.True(await Sent.TryAddAsync("alerts", "swap", "stable/Overpaid/", now));
         Assert.True(await Sent.TryAddAsync("alerts", "", "chain/StatusUnavailable/", now));
         Assert.True(await Sent.TryAddAsync("alerts-other", "swap", "chain/Overpaid/", now));
 
@@ -31,7 +31,7 @@ public class SatoraSentAlertsIntegrationTests(SatoraWalletIntegrationTests.Datab
 
         Assert.True(await Sent.TryAddAsync("alerts", "swap", "chain/Overpaid/", now));
         Assert.True(await Sent.TryAddAsync("alerts", "swap", "chain/UnexpectedStatus/Expired", now));
-        Assert.False(await Sent.TryAddAsync("alerts", "swap", "outgoing/FundingUnresolved/", now));
+        Assert.False(await Sent.TryAddAsync("alerts", "swap", "stable/Overpaid/", now));
         Assert.False(await Sent.TryAddAsync("alerts", "", "chain/StatusUnavailable/", now));
         Assert.False(await Sent.TryAddAsync("alerts-other", "swap", "chain/Overpaid/", now));
     }
