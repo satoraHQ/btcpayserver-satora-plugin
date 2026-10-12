@@ -1,9 +1,7 @@
-@using BTCPayServer.Plugins.Satora.Models
 @using BTCPayServer.Plugins.Satora.Services
-@inject SatoraPluginService pluginService
+@inject SatoraWalletService walletService
 @{
-    SatoraSettings settings = await pluginService.GetStoreSettings(Model.StoreId);
-    if (settings?.Enabled is not true) return;
+    if (!(await walletService.GetStatusAsync(Model.StoreId)).Enabled) return;
 }
 
 <a href="#Satora" class="btcpay-pill m-0 payment-method" :class="{ active: pmId === 'Satora' }"

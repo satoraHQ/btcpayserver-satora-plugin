@@ -18,12 +18,12 @@ namespace BTCPayServer.Plugins.Satora.Controllers
             var rep = new SwapResponse();
             try
             {
-                var settings = await pluginService.GetStoreSettings(storeId);
+                var seed = await pluginService.GetCheckoutSeedAsync(storeId);
 
                 req.BtcNetwork = "ARKADE";
-                req.BtcDestination = await satoraService.GetArkadeAddressAsync(settings.Seed);
+                req.BtcDestination = await satoraService.GetArkadeAddressAsync(seed);
 
-                rep = await satoraService.CreateSwapAsync(req, settings.Seed);
+                rep = await satoraService.CreateSwapAsync(req, seed);
 
                 await pluginService.AddStoreTransaction(new SatoraTx
                 {
@@ -48,9 +48,9 @@ namespace BTCPayServer.Plugins.Satora.Controllers
         }
 
         [HttpGet("{id}")]
-        public async Task<string> GetSwapInfo([FromRoute] string id)
+        public async Task<string> GetSwapInfo([FromRoute] string storeId, [FromRoute] string id)
         {
-            var seedPhrase = await pluginService.GetSeedPhraseBySwapId(id) ?? "";
+            var seedPhrase = await pluginService.GetSeedPhraseBySwapId(storeId, id) ?? "";
             return await satoraService.GetSwapInfoAsync(id, seedPhrase);
         }
 

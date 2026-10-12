@@ -1,0 +1,65 @@
+using NBitcoin;
+using SatoraBitcoinNetwork = uniffi.satora_sdk_ffi.BitcoinNetwork;
+
+namespace BTCPayServer.Plugins.Satora.Services;
+
+public static class SatoraNetworks
+{
+    // Read through BTCPay's configuration: BTCPAY_SATORA_BASEURL in the environment, or
+    // satora_baseurl= in settings.config.
+    public const string BaseUrlKey = "SATORA_BASEURL";
+    public const string ArkadeServerUrlKey = "SATORA_ARKADESERVERURL";
+    public const string EsploraUrlKey = "SATORA_ESPLORAURL";
+
+    public static SatoraBitcoinNetwork FromChain(ChainName chain)
+    {
+        if (chain == ChainName.Mainnet)
+            return SatoraBitcoinNetwork.Mainnet;
+        if (chain == ChainName.Regtest)
+            return SatoraBitcoinNetwork.Regtest;
+        if (chain == global::NBitcoin.Bitcoin.Instance.Signet.ChainName)
+            return SatoraBitcoinNetwork.Signet;
+        throw new NotSupportedException(
+            $"Satora does not support {chain}. Run BTCPay on mainnet, signet or regtest.");
+    }
+
+    // Overrides point a test deployment at its own backend; a mainnet store always uses the SDK defaults.
+    public static SatoraEndpoints Endpoints(IConfiguration configuration, SatoraBitcoinNetwork network)
+    {
+        if (network == SatoraBitcoinNetwork.Mainnet)
+            return new SatoraEndpoints(null, null, null);
+        return new SatoraEndpoints(
+            NullIfEmpty(configuration[BaseUrlKey]),
+            NullIfEmpty(configuration[ArkadeServerUrlKey]),
+            NullIfEmpty(configuration[EsploraUrlKey]));
+    }
+
+    public static bool HasEndpointOverrides(IConfiguration configuration) =>
+        new[] { BaseUrlKey, ArkadeServerUrlKey, EsploraUrlKey }.Any(key => NullIfEmpty(configuration[key]) is not null);
+
+    public static string WalletDirectory(string dataDir, SatoraBitcoinNetwork network, string storeId)
+    {
+        if (string.IsNullOrEmpty(storeId) || storeId is "." or ".." ||
+            storeId.IndexOfAny(['/', '\\']) >= 0 || storeId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            throw new ArgumentException("Not a valid store id for a directory name.", nameof(storeId));
+        return Path.Combine(dataDir, "SatoraWallets", network.ToString().ToLowerInvariant(), storeId);
+    }
+
+    // The directory holds the SDK's swap and contract databases.
+    public static void CreateOwnerOnlyDirectory(string directory)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Directory.CreateDirectory(directory);
+            return;
+        }
+        const UnixFileMode ownerOnly = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        Directory.CreateDirectory(directory, ownerOnly);
+        // CreateDirectory leaves the mode of a directory that already exists alone.
+        File.SetUnixFileMode(directory, ownerOnly);
+    }
+
+    private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+}
+
+public sealed record SatoraEndpoints(string? BaseUrl, string? ArkadeServerUrl, string? EsploraUrl);

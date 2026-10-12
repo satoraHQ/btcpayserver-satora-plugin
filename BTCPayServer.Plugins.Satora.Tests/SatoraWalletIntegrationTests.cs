@@ -1,0 +1,636 @@
+using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Configuration;
+using BTCPayServer.Logging;
+using BTCPayServer.Plugins.Satora.Data;
+using BTCPayServer.Plugins.Satora.Models;
+using BTCPayServer.Plugins.Satora.Services;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using NBitcoin;
+using NBXplorer;
+using Npgsql;
+using Satora.Sdk;
+using Xunit;
+using SatoraBitcoinNetwork = uniffi.satora_sdk_ffi.BitcoinNetwork;
+
+namespace BTCPayServer.Plugins.Satora.Tests;
+
+// Opt-in, against a real Postgres and, for the tests that read a wallet's balance or address, a regtest arkd:
+//   SATORA_TEST_POSTGRES  connection string to a server where the tests may create and drop a database
+//   SATORA_TEST_ARKD      arkd URL, such as http://localhost:7070
+public class SatoraWalletIntegrationTests(SatoraWalletIntegrationTests.Database db)
+    : IClassFixture<SatoraWalletIntegrationTests.Database>
+{
+    private const string NeedsPostgres = "Set SATORA_TEST_POSTGRES to run";
+    private const string NeedsArkd = "Set SATORA_TEST_POSTGRES and SATORA_TEST_ARKD to run";
+    // Nothing listens here, so the client never reaches an Arkade server.
+    private const string NoArkd = "http://127.0.0.1:9";
+    private static readonly TimeSpan Blocked = TimeSpan.FromMilliseconds(500);
+
+    public static bool HasPostgres => Database.Server is not null;
+    public static bool HasArkd => HasPostgres && Database.Arkd is not null;
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task RestoresTheLegacySeedOfAMigratedMasterDatabaseAndRetiresItsCiphertextAndSwaps()
+    {
+        var (_, wallets) = db.Wallets();
+        var before = await db.Settings(Database.LegacyStore);
+        Assert.True(before is { CryptedSeed: Database.LegacyCiphertext, ProtectedSeed: null, BackupConfirmed: false, Enabled: true });
+
+        Assert.Equal(SatoraWalletState.RestoreRequired, (await wallets.GetStatusAsync(Database.LegacyStore)).State);
+        Assert.Equal(SeedWriteRefusal.RestoreOnly, (await wallets.GenerateAsync(Database.LegacyStore, null)).Refusal);
+        Assert.Equal(1, await wallets.CountOpenOperationsAsync(Database.LegacyStore));
+        Assert.Equal(SeedWriteRefusal.None, await wallets.RestoreAsync(Database.LegacyStore, SatoraMnemonic.Generate(), null));
+
+        var after = await db.Settings(Database.LegacyStore);
+        Assert.True(after is { CryptedSeed: null, ProtectedSeed: not null, BackupConfirmed: true, Enabled: false });
+        Assert.Equal(64, after.LightningConnectionKey?.Length);
+        var retired = Assert.Single(await db.Retired(Database.LegacyStore));
+        Assert.Equal((SatoraRetiredSeed.LegacyFormat, Database.LegacyCiphertext), (retired.Format, retired.Ciphertext));
+        // The legacy seed's Pending swap would otherwise refuse every replace of the restored wallet.
+        Assert.Equal(0, await wallets.CountOpenOperationsAsync(Database.LegacyStore));
+        await db.AddSwaps(Database.LegacyStore, "Pending");
+        Assert.Equal(1, await wallets.CountOpenOperationsAsync(Database.LegacyStore));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task CountsTheSwapsThatStillNeedTheSeed()
+    {
+        var (_, wallets) = db.Wallets();
+        await db.AddSwaps("count", "Pending", null, "ClientInvalidFunded", "ServerWontFund", "Expired", "ClientRedeemed", "ClientRefunded");
+        await db.AddSwaps("count-other-store", "Pending");
+
+        Assert.Equal(4, await wallets.CountOpenOperationsAsync("count"));
+    }
+
+    // A store taking payments all day can have many open at once.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task NamesOnlyTheFirstFewOfEachKindThatBlockAReplace()
+    {
+        var (_, wallets) = db.Wallets();
+        await db.AddSwaps("name-many", "Pending", "Pending", "Pending", "Pending", "Pending", "Pending", "Pending");
+
+        var named = await wallets.DescribeOpenOperationsAsync("name-many");
+
+        Assert.Matches(@"^swaps of an earlier plugin version: [0-9a-f-]{36}(, [0-9a-f-]{36}){4} and 2 more$", named);
+    }
+
+    // BTCPay's log is the store's record of who changed the wallet when.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task LogsEachChangeToTheWalletAndEachRefusedSeedWrite()
+    {
+        var log = new RecordingLogger<SatoraWalletService>();
+        var (_, wallets) = db.Wallets(logger: log);
+
+        var phrase = await ReadyAndEnabled(wallets, "audit");
+        Assert.True(await wallets.SetEnabledAsync("audit", true));
+        await db.AddSwaps("audit", "Pending");
+        Assert.Equal(SeedWriteRefusal.OpenOperations, (await wallets.GenerateAsync("audit", SeedWriteGuard.ConfirmationWord)).Refusal);
+        Assert.Equal(SeedWriteRefusal.None, await wallets.RestoreAsync("audit", phrase, null));
+        Assert.True(await wallets.SetEnabledAsync("audit", false));
+
+        Assert.Equal([
+                "Generated a new Satora wallet for store audit",
+                "Enabled the Satora wallet of store audit",
+                "Generating a new Satora wallet for store audit was refused (OpenOperations)",
+                "Restored a Satora wallet for store audit from its recovery phrase",
+                "Disabled the Satora wallet of store audit"
+            ],
+            log.Entries.Where(e => e.Level == LogLevel.Information).Select(e => e.Message));
+    }
+
+    [Fact(Skip = NeedsArkd, SkipUnless = nameof(HasArkd))]
+    public async Task ReplacingAWalletRetiresItsSeedAndStartsTheNewOneDisabledWithANewConnectionKey()
+    {
+        var (registry, wallets) = db.Wallets(Database.Arkd);
+        await ReadyAndEnabled(wallets, "replace");
+        var old = await db.Settings("replace");
+        var oldWallet = await registry.GetAsync("replace");
+
+        var (refusal, phrase) = await wallets.GenerateAsync("replace", null);
+
+        Assert.Equal(SeedWriteRefusal.None, refusal);
+        var now = await db.Settings("replace");
+        Assert.True(now is { Enabled: false, BackupConfirmed: false, BackupConfirmedAt: null });
+        Assert.NotEqual(old.ProtectedSeed, now.ProtectedSeed);
+        Assert.Equal(SatoraMnemonic.Fingerprint(phrase!), now.SeedFingerprint);
+        Assert.NotEqual(old.LightningConnectionKey, now.LightningConnectionKey);
+        Assert.Equal(64, now.LightningConnectionKey?.Length);
+        var retired = Assert.Single(await db.Retired("replace"));
+        Assert.Equal((SatoraRetiredSeed.DataProtectionFormat, old.ProtectedSeed, old.SeedFingerprint),
+            (retired.Format, retired.Ciphertext, retired.SeedFingerprint));
+        await AssertDisposed(oldWallet);
+        Assert.NotSame(oldWallet, await registry.GetAsync("replace"));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task RestoringTheSameWalletKeepsItsClientAndConnectionKeyAndRetiresNothing()
+    {
+        var (registry, wallets) = db.Wallets();
+        var phrase = await ReadyAndEnabled(wallets, "same");
+        await db.AddSwaps("same", "ServerFunded");
+        var key = (await db.Settings("same")).LightningConnectionKey;
+        var wallet = await registry.GetAsync("same");
+
+        Assert.Equal(SeedWriteRefusal.None, await wallets.RestoreAsync("same", phrase, null));
+
+        Assert.Same(wallet, await registry.GetAsync("same"));
+        Assert.True(await db.Settings("same") is { Enabled: true } now && now.LightningConnectionKey == key);
+        Assert.Empty(await db.Retired("same"));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task RestoringTheSameWalletBeforeItsBackupIsConfirmedConfirmsItAndRetiresNothing()
+    {
+        var (_, wallets) = db.Wallets();
+        var (_, phrase) = await wallets.GenerateAsync("unconfirmed", null);
+
+        Assert.Equal(SeedWriteRefusal.None, await wallets.RestoreAsync("unconfirmed", phrase!, null));
+
+        Assert.Equal(SatoraWalletState.Ready, (await wallets.GetStatusAsync("unconfirmed")).State);
+        Assert.Empty(await db.Retired("unconfirmed"));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task ALockedSeedIsUnlockedByItsOwnPhraseOnly()
+    {
+        var (_, wallets) = db.Wallets();
+        var phrase = await ReadyAndEnabled(wallets, "locked");
+        var before = await db.Settings("locked");
+        var (_, otherKeys) = db.Wallets(keys: "other-keys");
+
+        Assert.Equal(SatoraWalletState.Locked, (await otherKeys.GetStatusAsync("locked")).State);
+        Assert.Equal(SeedWriteRefusal.Locked, (await otherKeys.GenerateAsync("locked", SeedWriteGuard.ConfirmationWord)).Refusal);
+        Assert.Equal(SeedWriteRefusal.Locked, await otherKeys.RestoreAsync("locked", SatoraMnemonic.Generate(), SeedWriteGuard.ConfirmationWord));
+        Assert.Equal(SeedWriteRefusal.None, await otherKeys.RestoreAsync("locked", phrase, null));
+
+        Assert.Equal(new SatoraWalletStatus(SatoraWalletState.Ready, phrase, true), await otherKeys.GetStatusAsync("locked"));
+        Assert.Equal(before.LightningConnectionKey, (await db.Settings("locked")).LightningConnectionKey);
+        Assert.Equal(before.ProtectedSeed, Assert.Single(await db.Retired("locked")).Ciphertext);
+    }
+
+    // The registry says once, as an error, that the seed cannot be decrypted. The warm-up and every
+    // balance read that then find the wallet locked log at Debug, without a stack trace.
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task ALockedWalletIsLoggedOnceAsAnErrorAndEachReadOfItOnlyAtDebug()
+    {
+        var (_, wallets) = db.Wallets();
+        await ReadyAndEnabled(wallets, "locked-log");
+        var registryLog = new RecordingLogger<SatoraWalletRegistry>();
+        var serviceLog = new RecordingLogger<SatoraWalletService>();
+        var (registry, otherKeys) = db.Wallets(keys: "other-keys", logger: serviceLog, registryLogger: registryLog);
+
+        registry.Warm("locked-log");
+        await registry.WaitForWarmUpsAsync();
+        Assert.Null(await otherKeys.TryGetBalanceAsync("locked-log"));
+        Assert.Null(await otherKeys.TryGetBalanceAsync("locked-log"));
+
+        Assert.Contains((LogLevel.Error, "The Satora wallet seed of store locked-log cannot be decrypted with BTCPay's data protection keys"),
+            registryLog.Entries);
+        Assert.Single(registryLog.Entries, e => e.Message.Contains("cannot be decrypted"));
+        Assert.DoesNotContain(registryLog.Entries.Concat(serviceLog.Entries), e => e.Level == LogLevel.Warning);
+        const string reason = "(The store's Satora wallet is not usable (Locked).)";
+        Assert.Equal([$"Could not prepare the Satora wallet of store locked-log {reason}"],
+            registryLog.Entries.Where(e => e.Level == LogLevel.Debug).Select(e => e.Message));
+        Assert.Equal([$"Could not open the Satora wallet of store locked-log {reason}", $"Could not open the Satora wallet of store locked-log {reason}"],
+            serviceLog.Entries.Where(e => e.Level == LogLevel.Debug).Select(e => e.Message));
+        Assert.All(registryLog.Entries.Zip(registryLog.Errors).Where(e => e.First.Level == LogLevel.Debug), e => Assert.Null(e.Second));
+        Assert.All(serviceLog.Errors, e => Assert.Null(e));
+    }
+
+    // A replace decides without a wallet it cannot build, so the balance is unknown. A wallet that is
+    // only unusable, which the registry has already said, is logged at Debug; any other failure warns.
+    [Theory(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AReplaceLogsAWalletItCannotBuild(bool unusable)
+    {
+        var store = unusable ? "replace-unusable" : "replace-unbuilt";
+        var (_, wallets) = db.Wallets();
+        await ReadyAndEnabled(wallets, store);
+        var log = new RecordingLogger<SatoraWalletRegistry>();
+        var (registry, replacing) = db.Wallets(registryLogger: log);
+        Exception failure = unusable ? new SatoraWalletUnavailableException("not usable") : new InvalidOperationException("arkd refused");
+        registry.AfterBuild = wallet =>
+        {
+            wallet.Dispose();
+            throw failure;
+        };
+
+        Assert.Equal(SeedWriteRefusal.BalanceUnknown, (await replacing.GenerateAsync(store, SeedWriteGuard.ConfirmationWord)).Refusal);
+
+        var built = Assert.Single(log.Entries.Zip(log.Errors), e => e.First.Message.StartsWith($"Could not build the Satora wallet of store {store}"));
+        Assert.Equal(unusable ? LogLevel.Debug : LogLevel.Warning, built.First.Level);
+        Assert.Same(unusable ? null : failure, built.Second);
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task DisablingKeepsTheClientWhileASwapNeedsItAndEvictsItAfterwards()
+    {
+        var (registry, wallets) = db.Wallets();
+        await ReadyAndEnabled(wallets, "evict");
+        await db.AddSwaps("evict", "ClientFundedServerRefunded");
+        var wallet = await registry.GetAsync("evict");
+
+        Assert.True(await wallets.SetEnabledAsync("evict", false));
+        Assert.Same(wallet, await registry.GetAsync("evict"));
+
+        await db.SetSwapStatuses("evict", "ClientRefunded");
+        Assert.True(await wallets.SetEnabledAsync("evict", false));
+        Assert.NotSame(wallet, await registry.GetAsync("evict"));
+        await AssertDisposed(wallet);
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task AReplaceWaitsForASwapBeingCreatedAndCountsIt()
+    {
+        var (registry, wallets) = db.Wallets();
+        await ReadyAndEnabled(wallets, "creating");
+        var started = new TaskCompletionSource();
+        var finish = new TaskCompletionSource();
+        var creating = registry.UseAsync("creating", async _ =>
+        {
+            started.SetResult();
+            await finish.Task;
+            await db.AddSwaps("creating", "Pending");
+            return true;
+        });
+        await started.Task;
+
+        var replace = wallets.GenerateAsync("creating", SeedWriteGuard.ConfirmationWord);
+        await Task.Delay(Blocked, TestContext.Current.CancellationToken);
+        Assert.False(replace.IsCompleted);
+        finish.SetResult();
+
+        Assert.True(await creating);
+        Assert.Equal(SeedWriteRefusal.OpenOperations, (await replace).Refusal);
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task AReplaceWaitingForASwapDoesNotHoldUpAnotherStoresWallet()
+    {
+        var (registry, wallets) = db.Wallets();
+        await ReadyAndEnabled(wallets, "busy");
+        var (_, phrase) = await wallets.GenerateAsync("idle", null);
+        var started = new TaskCompletionSource();
+        var finish = new TaskCompletionSource();
+        var creating = registry.UseAsync("busy", async _ =>
+        {
+            started.SetResult();
+            await finish.Task;
+            return true;
+        });
+        try
+        {
+            await started.Task;
+            var replace = wallets.GenerateAsync("busy", SeedWriteGuard.ConfirmationWord);
+            await Task.Delay(Blocked, TestContext.Current.CancellationToken);
+            Assert.False(replace.IsCompleted);
+
+            Assert.True(await wallets.ConfirmBackupAsync("idle", phrase).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+
+            finish.SetResult();
+            Assert.True(await creating);
+            Assert.Equal(SeedWriteRefusal.BalanceUnknown, (await replace).Refusal);
+        }
+        finally
+        {
+            finish.TrySetResult();
+        }
+    }
+
+    [Fact(Skip = NeedsArkd, SkipUnless = nameof(HasArkd))]
+    public async Task ASwapOrReadStartedDuringAReplaceGetsTheNewWallet()
+    {
+        var (registry, wallets) = db.Wallets(Database.Arkd);
+        await ReadyAndEnabled(wallets, "during");
+        var oldWallet = await registry.GetAsync("during");
+
+        Task<(SeedWriteRefusal Refusal, string? Mnemonic)> replace;
+        Task<StoreWallet> use, read;
+        // Holding the swap table makes the replace wait inside the registry's gate, where it counts swaps.
+        await using (await db.LockSwapTable())
+        {
+            replace = wallets.GenerateAsync("during", null);
+            await db.WaitForABlockedQuery();
+            use = registry.UseAsync("during", Task.FromResult);
+            read = registry.GetAsync("during");
+            await Task.Delay(Blocked, TestContext.Current.CancellationToken);
+            Assert.False(use.IsCompleted);
+            Assert.False(read.IsCompleted);
+        }
+
+        Assert.Equal(SeedWriteRefusal.None, (await replace).Refusal);
+        var newWallet = await use;
+        Assert.NotSame(oldWallet, newWallet);
+        Assert.Same(newWallet, await read);
+        await AssertDisposed(oldWallet);
+    }
+
+    [Fact(Skip = NeedsArkd, SkipUnless = nameof(HasArkd))]
+    public async Task AnActionGivenAWalletJustBeforeAReplaceRunsOnTheNewWallet()
+    {
+        var (registry, wallets) = db.Wallets(Database.Arkd);
+        await ReadyAndEnabled(wallets, "window");
+        var oldWallet = await registry.GetAsync("window");
+        var replace = new TaskCompletionSource<Task<(SeedWriteRefusal Refusal, string? Mnemonic)>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var replaceHoldsTheWallet = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var seen = new List<StoreWallet>();
+
+        Task<StoreWallet> use;
+        // Holding the swap table makes the replace wait inside the registry's gate with the old wallet's SpendLock held.
+        await using (await db.LockSwapTable())
+        {
+            registry.BeforeSpendLock = async () =>
+            {
+                registry.BeforeSpendLock = null;
+                replace.SetResult(wallets.GenerateAsync("window", null));
+                await db.WaitForABlockedQuery();
+                replaceHoldsTheWallet.SetResult();
+            };
+            use = registry.UseAsync("window", wallet =>
+            {
+                seen.Add(wallet);
+                return Task.FromResult(wallet);
+            });
+            await replaceHoldsTheWallet.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            await Task.Delay(Blocked, TestContext.Current.CancellationToken);
+            Assert.False(use.IsCompleted);
+        }
+
+        Assert.Equal(SeedWriteRefusal.None, (await await replace.Task).Refusal);
+        var newWallet = await use;
+        Assert.NotSame(oldWallet, newWallet);
+        Assert.Same(newWallet, Assert.Single(seen));
+        Assert.Same(newWallet, await registry.GetAsync("window"));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task AReplaceIsRefusedWhenTheBalanceCannotBeRead()
+    {
+        var (_, wallets) = db.Wallets(NoArkd);
+        await ReadyAndEnabled(wallets, "unreadable");
+
+        Assert.Equal(SeedWriteRefusal.BalanceUnknown, (await wallets.GenerateAsync("unreadable", SeedWriteGuard.ConfirmationWord)).Refusal);
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task ADisposedRegistryBuildsNoWallet()
+    {
+        var (registry, wallets) = db.Wallets();
+        await wallets.GenerateAsync("disposed", null);
+
+        registry.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => registry.GetAsync("disposed"));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => registry.UseAsync("disposed", _ => Task.FromResult(true)));
+        Assert.False(Directory.Exists(SatoraNetworks.WalletDirectory(db.DataDir, SatoraBitcoinNetwork.Regtest, "disposed")));
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task AWalletStillBeingBuiltWhenTheRegistryIsDisposedIsDisposedAndHandedToNobody()
+    {
+        var (registry, wallets) = db.Wallets();
+        await wallets.GenerateAsync("late", null);
+        var built = new TaskCompletionSource<StoreWallet>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource();
+        registry.AfterBuild = async wallet =>
+        {
+            built.SetResult(wallet);
+            await finish.Task;
+        };
+        var get = registry.GetAsync("late");
+        var wallet = await built.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        registry.Dispose();
+        finish.SetResult();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => get);
+        await AssertDisposed(wallet);
+    }
+
+    [Fact(Skip = NeedsPostgres, SkipUnless = nameof(HasPostgres))]
+    public async Task WaitingForWarmUpsWaitsForOneStillBuildingItsWallet()
+    {
+        var (registry, wallets) = db.Wallets();
+        await wallets.GenerateAsync("warming", null);
+        var built = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource();
+        registry.AfterBuild = async _ =>
+        {
+            built.SetResult();
+            await finish.Task;
+        };
+        registry.Warm("warming");
+        await built.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        var warmUps = registry.WaitForWarmUpsAsync();
+        await Task.Delay(Blocked, TestContext.Current.CancellationToken);
+        Assert.False(warmUps.IsCompleted);
+        finish.SetResult();
+
+        await warmUps.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+    }
+
+    [Fact(Skip = NeedsArkd, SkipUnless = nameof(HasArkd))]
+    public async Task TheClientTalksToArkdAndKeepsItsDatabasesInTheStoreDirectory()
+    {
+        var (registry, wallets) = db.Wallets(Database.Arkd);
+        await ReadyAndEnabled(wallets, "arkd");
+
+        Assert.StartsWith("tark1", await (await registry.GetAsync("arkd")).GetArkadeAddressAsync(TestContext.Current.CancellationToken));
+        Assert.True(await wallets.TryGetBalanceAsync("arkd") is { confirmedSats: 0, preConfirmedSats: 0, recoverableSats: 0 });
+        var directory = SatoraNetworks.WalletDirectory(db.DataDir, SatoraBitcoinNetwork.Regtest, "arkd");
+        Assert.True(File.Exists(Path.Combine(directory, "swaps.sqlite")));
+        Assert.Single(Directory.GetFiles(directory, "contracts-*.sqlite"));
+        if (!OperatingSystem.IsWindows())
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(directory));
+    }
+
+    // A disposed client still serves calls that were in flight when it was disposed, such as the address
+    // lookup with which enabling a wallet warms it up, and is released once they finish.
+    private static async Task AssertDisposed(StoreWallet wallet)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        while (true)
+        {
+            try
+            {
+                await wallet.Client.GetArkadeBalanceAsync(timeout.Token);
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            catch (SdkException)
+            {
+            }
+            await Task.Delay(100, timeout.Token);
+        }
+    }
+
+    private static async Task<string> ReadyAndEnabled(SatoraWalletService wallets, string storeId)
+    {
+        var (refusal, phrase) = await wallets.GenerateAsync(storeId, null);
+        Assert.Equal(SeedWriteRefusal.None, refusal);
+        Assert.True(await wallets.ConfirmBackupAsync(storeId, phrase));
+        Assert.True(await wallets.SetEnabledAsync(storeId, true));
+        return phrase!;
+    }
+
+    public sealed class Database : IAsyncLifetime
+    {
+        public const string LegacyStore = "legacy";
+        public const string LegacyCiphertext = "bGVnYWN5";
+        // The last migration on master, which deployments of earlier plugin versions have applied.
+        private const string MasterMigration = "20260623_StatusIdx";
+        private const string Schema = "\"BTCPayServer.Plugins.Satora\"";
+
+        public static readonly string? Server = Environment.GetEnvironmentVariable("SATORA_TEST_POSTGRES") is { Length: > 0 } s ? s : null;
+        public static readonly string? Arkd = Environment.GetEnvironmentVariable("SATORA_TEST_ARKD") is { Length: > 0 } a ? a : null;
+
+        private readonly string _name = $"satora_test_{Guid.NewGuid():N}";
+        private readonly List<SatoraWalletRegistry> _registries = [];
+        private string _scratch = null!;
+        private SatoraPluginDbContextFactory _contexts = null!;
+        private BTCPayNetworkProvider _networks = null!;
+
+        public string DataDir => Path.Combine(_scratch, "data");
+
+        private string ConnectionString => new NpgsqlConnectionStringBuilder(Server) { Database = _name }.ConnectionString;
+
+        public async ValueTask InitializeAsync()
+        {
+            if (Server is null)
+                return;
+            _scratch = Directory.CreateTempSubdirectory("satora-test-").FullName;
+            await ExecuteOnServer($"CREATE DATABASE {_name}");
+            _contexts = new SatoraPluginDbContextFactory(Options.Create(new DatabaseOptions { ConnectionString = ConnectionString }));
+            var nbx = new NBXplorerNetworkProvider(ChainName.Regtest);
+            _networks = new BTCPayNetworkProvider([new BTCPayNetwork { CryptoCode = "BTC", NBXplorerNetwork = nbx.GetFromCryptoCode("BTC") }], nbx, new Logs());
+
+            // A database as master leaves it, with a legacy seed and a swap row. Migrator.MigrateAsync(target)
+            // only looks targets up by 14 digit ids, so master's migrations are applied as it would apply them.
+            await using (var ctx = _contexts.CreateContext())
+            {
+                var assembly = ctx.GetService<IMigrationsAssembly>();
+                var generator = ctx.GetService<IMigrationsSqlGenerator>();
+                var history = ctx.GetService<IHistoryRepository>();
+                await ctx.Database.ExecuteSqlRawAsync(history.GetCreateIfNotExistsScript());
+                foreach (var (id, type) in assembly.Migrations.Where(m => string.CompareOrdinal(m.Key, MasterMigration) <= 0))
+                {
+                    var migration = assembly.CreateMigration(type, ctx.Database.ProviderName!);
+                    foreach (var command in generator.Generate(migration.UpOperations))
+                        await ctx.Database.ExecuteSqlRawAsync(command.CommandText);
+                    await ctx.Database.ExecuteSqlRawAsync(history.GetInsertScript(new HistoryRow(id, ProductInfo.GetVersion())));
+                }
+                await ctx.Database.ExecuteSqlRawAsync(
+                    $"INSERT INTO {Schema}.\"SatoraSettings\" (\"StoreId\", \"Enabled\", \"CryptedSeed\") VALUES ('{LegacyStore}', true, '{LegacyCiphertext}')");
+            }
+            await AddSwaps(LegacyStore, "Pending");
+            // What PluginMigrationRunner does at startup.
+            await using (var ctx = _contexts.CreateContext())
+                await ctx.Database.MigrateAsync();
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Server is null)
+                return;
+            await Task.WhenAll(_registries.Select(r => r.WaitForWarmUpsAsync()));
+            foreach (var registry in _registries)
+                registry.Dispose();
+            NpgsqlConnection.ClearAllPools();
+            await ExecuteOnServer($"DROP DATABASE IF EXISTS {_name} WITH (FORCE)");
+            Directory.Delete(_scratch, true);
+        }
+
+        public (SatoraWalletRegistry Registry, SatoraWalletService Wallets) Wallets(string? arkd = NoArkd, string keys = "keys",
+            ILogger<SatoraWalletService>? logger = null, ILogger<SatoraWalletRegistry>? registryLogger = null)
+        {
+            var protector = new SatoraSeedProtector(DataProtectionProvider.Create(new DirectoryInfo(Path.Combine(_scratch, keys))));
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [SatoraNetworks.BaseUrlKey] = NoArkd,
+                [SatoraNetworks.ArkadeServerUrlKey] = arkd,
+                [SatoraNetworks.EsploraUrlKey] = NoArkd
+            }).Build();
+            // No SatoraNotifier, which needs BTCPay's own database: the registry logs that it could not notify.
+            var registry = new SatoraWalletRegistry(_contexts, protector, null!, _networks, configuration,
+                Options.Create(new DataDirectories { DataDir = DataDir }), registryLogger ?? NullLogger<SatoraWalletRegistry>.Instance);
+            _registries.Add(registry);
+            return (registry, new SatoraWalletService(_contexts, protector, registry, logger ?? NullLogger<SatoraWalletService>.Instance));
+        }
+
+        public async Task<SatoraSettings> Settings(string storeId)
+        {
+            await using var ctx = _contexts.CreateContext();
+            return await ctx.SatoraSettings.AsNoTracking().SingleAsync(s => s.StoreId == storeId);
+        }
+
+        public async Task<List<SatoraRetiredSeed>> Retired(string storeId)
+        {
+            await using var ctx = _contexts.CreateContext();
+            return await ctx.SatoraRetiredSeeds.AsNoTracking().Where(r => r.StoreId == storeId).ToListAsync();
+        }
+
+        public async Task AddSwaps(string storeId, params string?[] statuses)
+        {
+            await using var ctx = _contexts.CreateContext();
+            foreach (var status in statuses)
+                ctx.SatoraTransactions.Add(new SatoraTx
+                {
+                    TxID = Guid.NewGuid().ToString(),
+                    StoreId = storeId,
+                    Status = status,
+                    Stablecoin = "USDC",
+                    Blockchain = "Polygon",
+                    BTCPayInvoiceId = "invoice",
+                    DateT = DateTime.UtcNow
+                });
+            await ctx.SaveChangesAsync();
+        }
+
+        public async Task SetSwapStatuses(string storeId, string status)
+        {
+            await using var ctx = _contexts.CreateContext();
+            await ctx.SatoraTransactions.Where(t => t.StoreId == storeId).ExecuteUpdateAsync(t => t.SetProperty(x => x.Status, status));
+        }
+
+        // A connection whose open transaction holds the swap table; disposing it closes the connection and releases the lock.
+        public async Task<NpgsqlConnection> LockSwapTable()
+        {
+            var connection = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(ConnectionString) { Pooling = false }.ConnectionString);
+            await connection.OpenAsync();
+            var transaction = await connection.BeginTransactionAsync();
+            await using var command = new NpgsqlCommand($"LOCK TABLE {Schema}.\"SatoraTransactions\" IN ACCESS EXCLUSIVE MODE", connection, transaction);
+            await command.ExecuteNonQueryAsync();
+            return connection;
+        }
+
+        public async Task WaitForABlockedQuery()
+        {
+            await using var connection = new NpgsqlConnection(ConnectionString);
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'", connection);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            while ((long)(await command.ExecuteScalarAsync(timeout.Token))! == 0)
+                await Task.Delay(50, timeout.Token);
+        }
+
+        private async Task ExecuteOnServer(string sql)
+        {
+            await using var connection = new NpgsqlConnection(Server);
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand(sql, connection);
+            await command.ExecuteNonQueryAsync();
+        }
+    }
+}
